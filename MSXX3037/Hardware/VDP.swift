@@ -34,6 +34,10 @@ final class VDP {
     var debugSpriteSAT = true
     var debugRenderGFX4 = true
 
+    // Sprite render diagnostics
+    var spriteRenderCount = 0       // frames where sprites were actually drawn
+    var lastSpritePixelCount = 0    // pixels drawn in last sprite render
+
     // Line counter
     var currentLine: Int = 0
 
@@ -141,17 +145,27 @@ final class VDP {
     var colorTableBase: Int   { Int(regs[3]) << 6 }
     var patternTableBase: Int { Int(regs[4] & 0x07) << 11 }
     var spriteAttrBase: Int {
-        // V9938 Sprite Mode 2 (SCREEN 4-7): R#5 bit 0 must be 1 but is
-        // IGNORED for address calculation.  A14-A8 come from R#5[7:1].
+        // V9938 Sprite Mode 2 (SCREEN 4-8):
+        // SAT address = R#11[1:0] << 15 | (R#5 & 0xFC) << 7
+        // R#5 bits [1:0] must be written as "11" but are NOT used for
+        // address calculation (masked with 0xFC per V9938 datasheet).
+        // Color table is at SAT - 512 (fixed hardware relationship).
+        //
         // TMS9918A Sprite Mode 1 (SCREEN 1-3): R#5 bit 7 is unused,
         // A13-A7 come from R#5[6:0].
         let highBits = Int(regs[11] & 0x03) << 15
         let isSM2 = (screenMode == .graphic3 || screenMode == .graphic4 ||
                       screenMode == .graphic5 || screenMode == .graphic6 ||
                       screenMode == .graphic7)
-        let r5mask: UInt8 = isSM2 ? 0xFE : 0x7F
-        let lowBits  = Int(regs[5] & r5mask) << 7
-        return highBits | lowBits
+        if isSM2 {
+            // SM2: A14-A9 from R#5[7:2], A8-A0 = 0
+            let lowBits = Int(regs[5] & 0xFC) << 7
+            return highBits | lowBits
+        } else {
+            // SM1: A13-A7 from R#5[6:0]
+            let lowBits = Int(regs[5] & 0x7F) << 7
+            return highBits | lowBits
+        }
     }
     // V9938: R#6[5:0] = A16-A11 (6 ビット, 128KB VRAM 対応)
     // TMS9918A は R#6[2:0] の 3 ビットのみ使用するが、
@@ -797,6 +811,9 @@ final class VDP {
 
     // MARK: - Sprite rendering
     private func renderSprites(into pixels: inout [UInt32], lines: Int) {
+        // V9938 R#8 bit 1: SPD (Sprite Disable) — skip all sprite processing
+        if regs[8] & 0x02 != 0 { return }
+
         let attrBase = spriteAttrBase
         let patBase = spritePatBase
         let size = spriteSize
@@ -918,6 +935,8 @@ final class VDP {
             }
         }
 
+        lastSpritePixelCount = spritePixels.count
+        if !spritePixels.isEmpty { spriteRenderCount += 1 }
         for (idx, color) in spritePixels {
             pixels[idx] = color
         }

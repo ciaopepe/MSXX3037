@@ -829,6 +829,161 @@ final class MSXMachine {
         // VDP+VRAM state dump (disabled - game never reaches SCREEN 5)
         // if frameCount == 180 || frameCount == 300 || frameCount == 420 { dumpVDPState() }
 
+        // ── Periodic sprite / VDP command diagnostic (SCREEN 5 games) ──
+        if cartridgeLoaded && (frameCount == 300 || frameCount == 600 || frameCount == 900) {
+            let mode = vdp.screenMode
+            let r8 = vdp.regs[8]
+            let spd = (r8 & 0x02) != 0  // Sprite Disable
+            let r1 = vdp.regs[1]
+            let sprSize = (r1 & 0x02 != 0) ? 16 : 8
+            let sprMag = (r1 & 0x01 != 0) ? 2 : 1
+            // Sprite render stats from VDP
+            print(String(format: "[SPR DIAG @%d] spriteRenderFrames=%d lastPixels=%d (frames where SPD=0 and sprites drawn)",
+                         frameCount, vdp.spriteRenderCount, vdp.lastSpritePixelCount))
+            let attrBase = vdp.spriteAttrBase
+            let patBase = vdp.spritePatBase
+            let lines = vdp.activeLines
+            let terminator = lines > 192 ? 0xD8 : 0xD0
+
+            print(String(format: "[SPR DIAG @%d] mode=%@ R#1=%02X R#5=%02X R#6=%02X R#8=%02X R#11=%02X SPD=%d size=%d mag=%d",
+                         frameCount, "\(mode)", r1, vdp.regs[5], vdp.regs[6], r8, vdp.regs[11],
+                         spd ? 1 : 0, sprSize, sprMag))
+            print(String(format: "[SPR DIAG @%d] attrBase=%05X patBase=%05X lines=%d term=0x%02X",
+                         frameCount, attrBase, patBase, lines, terminator))
+
+            // Dump first 8 sprite entries from SAT
+            var activeCount = 0
+            for i in 0..<min(32, 8) {
+                let a = attrBase + i * 4
+                let sy = Int(vdp.vram[a & (VDP.vramSize - 1)])
+                if sy == terminator {
+                    print(String(format: "[SPR DIAG @%d] sprite[%d]: TERMINATOR (0x%02X) — %d active sprites",
+                                 frameCount, i, terminator, activeCount))
+                    break
+                }
+                activeCount += 1
+                let sx = Int(vdp.vram[(a+1) & (VDP.vramSize - 1)])
+                let sn = Int(vdp.vram[(a+2) & (VDP.vramSize - 1)])
+                let sa = vdp.vram[(a+3) & (VDP.vramSize - 1)]
+
+                // Check pattern data (first 8 bytes)
+                let patAddr = patBase + sn * 8
+                var patNonZero = 0
+                var patBytes = [String]()
+                let patSize = sprSize == 16 ? 32 : 8  // 16x16 uses 4 patterns
+                for j in 0..<patSize {
+                    let b = vdp.vram[(patAddr + j) & (VDP.vramSize - 1)]
+                    if b != 0 { patNonZero += 1 }
+                    if j < 8 { patBytes.append(String(format: "%02X", b)) }
+                }
+
+                // Mode 2 color table
+                let isSM2 = (mode == .graphic3 || mode == .graphic4 || mode == .graphic5 ||
+                              mode == .graphic6 || mode == .graphic7)
+                var colorStr = ""
+                if isSM2 {
+                    let colorBase = attrBase &- 512
+                    var colors = [String]()
+                    for j in 0..<min(sprSize, 16) {
+                        let cb = vdp.vram[(colorBase + i * 16 + j) & (VDP.vramSize - 1)]
+                        colors.append(String(format: "%02X", cb))
+                    }
+                    colorStr = " ct=[\(colors.joined(separator: " "))]"
+                }
+
+                print(String(format: "[SPR DIAG @%d] sprite[%d]: y=%3d x=%3d name=%3d attr=%02X patNZ=%d/%d pat0=[%@]%@",
+                             frameCount, i, sy, sx, sn, sa, patNonZero, patSize,
+                             patBytes.joined(separator: " "), colorStr))
+
+                if i == 7 && activeCount == 8 {
+                    print(String(format: "[SPR DIAG @%d] (showing first 8 of possibly more sprites)", frameCount))
+                }
+            }
+
+            // VDP command engine summary
+            let ce = vdp.commandEngine!
+            let cmdNames = ["STOP","?1","?2","?3","POINT","PSET","SRCH","LINE",
+                            "LMMV","LMMM","LMCM","LMMC","HMMV","HMMM","YMMM","HMMC"]
+            var cmdSummary = [String]()
+            for j in 0..<16 {
+                if ce.cmdCounts[j] > 0 {
+                    cmdSummary.append("\(cmdNames[j])=\(ce.cmdCounts[j])")
+                }
+            }
+            print(String(format: "[SPR DIAG @%d] VDP cmds: %@ hmmm_play=%d hmmm_status=%d lmmm_play=%d",
+                         frameCount,
+                         cmdSummary.isEmpty ? "(none)" : cmdSummary.joined(separator: " "),
+                         ce.hmmmPlayArea, ce.hmmmStatusBar, ce.lmmmPlayArea))
+
+            // Last 5 VDP commands from log
+            let logCount = min(ce.cmdLog.count, 5)
+            if logCount > 0 {
+                for j in (ce.cmdLog.count - logCount)..<ce.cmdLog.count {
+                    let e = ce.cmdLog[j]
+                    print(String(format: "[SPR DIAG @%d] cmdLog[%d]: %@ SX=%d SY=%d DX=%d DY=%d NX=%d NY=%d CLR=%02X ARG=%02X",
+                                 frameCount, j, cmdNames[Int(e.cmd)], e.sx, e.sy, e.dx, e.dy, e.nx, e.ny, e.clr, e.arg))
+                }
+            }
+
+            // VRAM stats for sprite areas
+            var patAreaNZ = 0
+            for j in 0..<(256 * 8) {  // check first 256 patterns (2KB)
+                if vdp.vram[(patBase + j) & (VDP.vramSize - 1)] != 0 { patAreaNZ += 1 }
+            }
+            print(String(format: "[SPR DIAG @%d] patArea(%05X): %d/2048 non-zero bytes",
+                         frameCount, patBase, patAreaNZ))
+
+            // ── VRAM scan: find actual SAT location ──
+            // Scan candidate addresses (128-byte aligned) around the expected region
+            // and dump hex to find where the real SAT data is
+            let scanStart = max(0, attrBase - 0x400)  // 1KB before current attrBase
+            let scanEnd = min(VDP.vramSize, attrBase + 0x400)  // 1KB after
+            print(String(format: "[VRAM SCAN @%d] Scanning %05X-%05X for SAT-like data (current attrBase=%05X):",
+                         frameCount, scanStart, scanEnd, attrBase))
+
+            // Also compute alternative SAT addresses for comparison
+            let altBase_FC = (Int(vdp.regs[11] & 0x03) << 15) | (Int(vdp.regs[5] & 0xFC) << 7)
+            let altSAT_FC = altBase_FC + 0x200
+            let altSAT_FE = (Int(vdp.regs[11] & 0x03) << 15) | (Int(vdp.regs[5] & 0xFE) << 7)
+            let altSAT_A7 = altSAT_FE | 0x80
+            print(String(format: "[VRAM SCAN @%d] Candidates: &FC+200=%05X  &FE=%05X  &FE|80=%05X  current=%05X",
+                         frameCount, altSAT_FC, altSAT_FE, altSAT_A7, attrBase))
+
+            // Dump 32 bytes at each candidate address
+            for candidate in [altSAT_FE, altSAT_A7, altSAT_FC, altSAT_FC - 0x80, altSAT_FC + 0x80] {
+                let addr = candidate & (VDP.vramSize - 1)
+                var bytes = [String]()
+                var nz = 0
+                for j in 0..<32 {
+                    let b = vdp.vram[(addr + j) & (VDP.vramSize - 1)]
+                    bytes.append(String(format: "%02X", b))
+                    if b != 0 { nz += 1 }
+                }
+                // Also check full 128 bytes for non-zero count
+                var nz128 = 0
+                for j in 0..<128 {
+                    if vdp.vram[(addr + j) & (VDP.vramSize - 1)] != 0 { nz128 += 1 }
+                }
+                print(String(format: "[VRAM SCAN @%d] @%05X (nz=%d/128): %@",
+                             frameCount, addr, nz128, bytes.joined(separator: " ")))
+            }
+
+            // Dump full 0xF000-0xF800 with non-zero summary per 128-byte block
+            print(String(format: "[VRAM SCAN @%d] Block non-zero summary:", frameCount))
+            var blockSummary = [String]()
+            let blkStart = attrBase & 0x1F000  // align to 4KB page
+            for blk in stride(from: blkStart, to: min(blkStart + 0x1000, VDP.vramSize), by: 128) {
+                var nzBlock = 0
+                for j in 0..<128 {
+                    if vdp.vram[(blk + j) & (VDP.vramSize - 1)] != 0 { nzBlock += 1 }
+                }
+                if nzBlock > 0 {
+                    blockSummary.append(String(format: "%05X:%d", blk, nzBlock))
+                }
+            }
+            print(String(format: "[VRAM SCAN @%d] %@", frameCount, blockSummary.joined(separator: " ")))
+        }
+
         // Auto keypress injection disabled (game doesn't boot yet)
         #if DEBUG
         #endif
