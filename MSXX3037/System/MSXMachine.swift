@@ -984,6 +984,46 @@ final class MSXMachine {
             print(String(format: "[VRAM SCAN @%d] %@", frameCount, blockSummary.joined(separator: " ")))
         }
 
+        // ── White pixel diagnostic (SCREEN 5) ──
+        // Scan visible VRAM area for color 15 (white) pixels to identify
+        // the source of "diagonal white lines" artifact.
+        if cartridgeLoaded && (frameCount == 300 || frameCount == 600) {
+            let mode = vdp.screenMode
+            if mode == .graphic4 {
+                let page = (Int(vdp.regs[2]) >> 5) & 0x03
+                let pageOffset = page * 0x08000
+                var white4bppCount = 0
+                var firstWhiteLocations = [String]()
+                for y in 0..<vdp.activeLines {
+                    for xByte in 0..<128 {
+                        let addr = (pageOffset + y * 128 + xByte) & (VDP.vramSize - 1)
+                        let b = vdp.vram[addr]
+                        let hiNibble = (b >> 4) & 0x0F
+                        let loNibble = b & 0x0F
+                        if hiNibble == 0x0F {
+                            white4bppCount += 1
+                            if firstWhiteLocations.count < 10 {
+                                firstWhiteLocations.append(String(format: "(%d,%d)=F_", xByte * 2, y))
+                            }
+                        }
+                        if loNibble == 0x0F {
+                            white4bppCount += 1
+                            if firstWhiteLocations.count < 10 {
+                                firstWhiteLocations.append(String(format: "(%d,%d)=_F", xByte * 2 + 1, y))
+                            }
+                        }
+                    }
+                }
+                print(String(format: "[WHITE DIAG @%d] page=%d white(0xF) pixels=%d  first: %@",
+                             frameCount, page, white4bppCount,
+                             firstWhiteLocations.isEmpty ? "none" : firstWhiteLocations.joined(separator: " ")))
+                // Also dump palette entry 15 to see what "white" maps to
+                let pal15 = vdp.palette[15]
+                print(String(format: "[WHITE DIAG @%d] palette[15]=%08X  LINE cmd count=%d",
+                             frameCount, pal15, vdp.commandEngine.cmdCounts[7]))
+            }
+        }
+
         // Auto keypress injection disabled (game doesn't boot yet)
         #if DEBUG
         #endif

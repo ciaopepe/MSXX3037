@@ -115,9 +115,21 @@ final class VDPCommandEngine {
                 cmdNames[Int(cmd)], cmd, cmdReg, SX, SY, DX, DY, NX, NY, CLR, ARG))
         }
 
-        // Clamp NX/NY to reasonable values
-        if NX == 0 { NX = maxNX }
-        if NY == 0 { NY = 1024 }
+        // NX=0/NY=0 → max: V9938 仕様では矩形コマンドのみ NX=0 を最大値として扱う。
+        // LINE コマンドでは NX=描画ドット数, NY=誤差項なので 0 はそのまま 0。
+        // POINT/PSET/SRCH も NX/NY をループカウントに使わないため変換不要。
+        let needClampNXNY: Bool
+        switch cmd {
+        case 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF:
+            // 矩形系コマンド: LMMV, LMMM, LMCM, LMMC, HMMV, HMMM, YMMM, HMMC
+            needClampNXNY = true
+        default:
+            needClampNXNY = false
+        }
+        if needClampNXNY {
+            if NX == 0 { NX = maxNX }
+            if NY == 0 { NY = 1024 }
+        }
 
         switch cmd {
         case 0x0: // STOP
@@ -330,7 +342,10 @@ final class VDPCommandEngine {
     }
 
     // MARK: - LINE: Draw line (Bresenham)
+    var debugLineCmd = true  // One-shot: log first LINE command
     private func execLine() {
+        guard NX > 0 else { return }  // NX=0 → no dots to draw
+
         let dix = DIX
         let diy = DIY
         let maj = (ARG & 0x01) != 0  // MAJ: 1=Y is major axis, 0=X is major axis
@@ -339,6 +354,12 @@ final class VDPCommandEngine {
         let shortSide = NY  // "number of dots" along minor axis (used as error term init)
         var dx = DX, dy = DY
         var err = 0
+
+        if debugLineCmd {
+            debugLineCmd = false
+            print(String(format: "[LINE] DX=%d DY=%d NX=%d NY=%d CLR=%02X ARG=%02X MAJ=%d DIX=%d DIY=%d op=%02X",
+                         DX, DY, NX, NY, CLR, ARG, maj ? 1 : 0, dix, diy, cmdByte & 0x0F))
+        }
 
         for _ in 0..<longSide {
             let dst = vdp.readPixel(x: dx & (maxNX - 1), y: dy & 0x3FF)

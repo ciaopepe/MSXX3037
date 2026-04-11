@@ -861,8 +861,12 @@ final class VDP {
         }
 
         var collisionDetected = false
-        var spritePixels = [Int: UInt32]()
-        var touchedPixels = Set<Int>()
+        // Sprite Mode 2 CC=1 (カラー合成): 色インデックスを論理 OR で合成し、
+        // 最後にパレット変換する。CC=0 のスプライトは通常の「先着優先」で描画。
+        // openMSX 準拠: バッファ（spriteColorIdx）が非 nil なら CC=0 は描画スキップ。
+        // CC=1 は常に OR。CC=0 は直接書き込み（OR しない）。
+        var spriteColorIdx = [Int: Int]()  // pixel index → accumulated color index
+        var touchedPixels  = Set<Int>()    // 衝突検出用
 
         for i in 0..<32 {
             let attrAddr = attrBase + i * 4
@@ -886,14 +890,14 @@ final class VDP {
                 // Mode 2: ライン毎のカラーをスプライトカラーテーブルから取得
                 let lineColor: Int
                 let lineEC: Bool
-                let lineCC: Bool  // Collision Cancel (Mode 2)
+                let lineCC: Bool  // Collision Cancel / Color Compose (Mode 2)
 
                 if isSpriteMode2 {
                     let colorAddr = colorTableBase + i * 16 + patY
                     let colorByte = vram[colorAddr & (VDP.vramSize - 1)]
                     lineColor = Int(colorByte & 0x0F)
                     lineEC = colorByte & 0x80 != 0   // bit 7: Early Clock
-                    lineCC = colorByte & 0x40 != 0   // bit 6: Collision Cancel
+                    lineCC = colorByte & 0x40 != 0   // bit 6: CC (Color Compose + Collision Cancel)
                 } else {
                     lineColor = mode1Color
                     lineEC = mode1EarlyC
@@ -920,25 +924,39 @@ final class VDP {
 
                     if bit != 0 {
                         let idx = pixY * VDP.screenWidth + pixX
-                        if !lineCC {
-                            if touchedPixels.contains(idx) {
-                                collisionDetected = true
-                            } else {
-                                touchedPixels.insert(idx)
+
+                        if lineCC {
+                            // CC=1: 色インデックスを OR 合成（衝突検出なし、ピクセル占有なし）
+                            // V9938 仕様: CC=1 のスプライトは既存の色と論理 OR で合成される
+                            if lineColor != 0 {
+                                spriteColorIdx[idx] = (spriteColorIdx[idx] ?? 0) | lineColor
                             }
-                        }
-                        if lineColor != 0 && spritePixels[idx] == nil {
-                            spritePixels[idx] = palette[lineColor]
+                        } else {
+                            // CC=0: 通常描画（先着優先 + 衝突検出）
+                            // 衝突検出: CC=0 の非透明ピクセル同士の重なりで発生
+                            if lineColor != 0 {
+                                if touchedPixels.contains(idx) {
+                                    collisionDetected = true
+                                } else {
+                                    touchedPixels.insert(idx)
+                                }
+                            }
+                            // 描画: バッファが空の場合のみ直接書き込み（OR しない）
+                            // CC=1 スプライトが既に書き込んだピクセルには CC=0 は上書きしない
+                            if lineColor != 0 && spriteColorIdx[idx] == nil {
+                                spriteColorIdx[idx] = lineColor
+                            }
                         }
                     }
                 }
             }
         }
 
-        lastSpritePixelCount = spritePixels.count
-        if !spritePixels.isEmpty { spriteRenderCount += 1 }
-        for (idx, color) in spritePixels {
-            pixels[idx] = color
+        lastSpritePixelCount = spriteColorIdx.count
+        if !spriteColorIdx.isEmpty { spriteRenderCount += 1 }
+        // 蓄積した色インデックスをパレット経由で RGBA に変換して描画
+        for (idx, colorIdx) in spriteColorIdx {
+            pixels[idx] = palette[colorIdx & 0x0F]
         }
 
         spriteCollisionLatched = collisionDetected
