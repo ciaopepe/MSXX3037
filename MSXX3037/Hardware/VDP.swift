@@ -54,6 +54,11 @@ final class VDP {
     // boundary wrap should be suppressed to prevent address corruption.
     // Only enable auto-increment after explicit R#14 write (MSX2 games).
     var r14ExplicitlySet = false
+    // R#14 "just written" flag: set when R#14 is written via register write,
+    // cleared on next 2nd-byte processing (address setup or other register write).
+    // Used to distinguish NSTWRT pattern (R#14 write → address setup) from
+    // MSX1 SETWRT pattern (address setup only, stale R#14).
+    var r14JustWritten = false
 
     // Debug: direct VRAM write tracking
     var directWriteCountPage0 = 0   // writes to page 0 (0x00000-0x07FFF)
@@ -127,6 +132,7 @@ final class VDP {
         paletteLatchFirst = true
         paletteLatchByte = 0
         r14ExplicitlySet = false
+        r14JustWritten = false
         resetPalette()
         commandEngine.reset()
     }
@@ -263,9 +269,25 @@ final class VDP {
                 if regNum < regs.count {
                     writeRegister(regNum, firstByte)
                 }
+                // Track whether this was an R#14 write (for NSTWRT detection)
+                r14JustWritten = (regNum == 14)
             } else {
-                // Address setup
+                // Address setup (14-bit latch)
                 addressLatch = (UInt16(value & 0x3F) << 8) | UInt16(firstByte)
+
+                // V9938 R#14 stale value fix:
+                // When a 14-bit address is set WITHOUT a preceding R#14 register write,
+                // reset R#14 to 0. This handles MSX1-style SETWRT/SETRD (and direct
+                // port access equivalents) that only set the 14-bit latch and expect
+                // to access VRAM page 0.
+                //
+                // NSTWRT pattern: R#14 write → address setup (r14JustWritten=true → skip reset)
+                // MSX1 pattern:   address setup only          (r14JustWritten=false → R#14=0)
+                if !r14JustWritten {
+                    regs[14] = 0
+                }
+                r14JustWritten = false
+
                 if value & 0x40 == 0 {
                     // Read mode: pre-read from full VRAM address
                     readBuffer = vram[fullAddress]

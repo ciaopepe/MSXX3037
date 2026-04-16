@@ -221,7 +221,7 @@ struct GamepadOverlay: View {
                            key: config.button2Key, machine: machine, size: 66,
                            turbo: config.button2Turbo)
             }
-        } else {
+        } else if config.keySet.buttonCount == 4 {
             // キーセットC: 4ボタン ダイヤモンド配置
             VStack(spacing: 8) {
                 FireButton(label: GamepadConfig.displayLabel(for: config.button3Key),
@@ -238,6 +238,32 @@ struct GamepadOverlay: View {
                 FireButton(label: GamepadConfig.displayLabel(for: config.button4Key),
                            key: config.button4Key, machine: machine, size: 48,
                            turbo: config.button4Turbo)
+            }
+        } else {
+            // キーセットD: 6ボタン 2段×3列配置
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    FireButton(label: GamepadConfig.displayLabel(for: config.button4Key),
+                               key: config.button4Key, machine: machine, size: 44,
+                               turbo: config.button4Turbo)
+                    FireButton(label: GamepadConfig.displayLabel(for: config.button5Key),
+                               key: config.button5Key, machine: machine, size: 44,
+                               turbo: config.button5Turbo)
+                    FireButton(label: GamepadConfig.displayLabel(for: config.button6Key),
+                               key: config.button6Key, machine: machine, size: 44,
+                               turbo: config.button6Turbo)
+                }
+                HStack(spacing: 8) {
+                    FireButton(label: GamepadConfig.displayLabel(for: config.button1Key),
+                               key: config.button1Key, machine: machine, size: 50,
+                               turbo: config.button1Turbo)
+                    FireButton(label: GamepadConfig.displayLabel(for: config.button2Key),
+                               key: config.button2Key, machine: machine, size: 50,
+                               turbo: config.button2Turbo)
+                    FireButton(label: GamepadConfig.displayLabel(for: config.button3Key),
+                               key: config.button3Key, machine: machine, size: 50,
+                               turbo: config.button3Turbo)
+                }
             }
         }
     }
@@ -395,9 +421,9 @@ struct SettingsView: View {
     @Binding var biosName: String
     let onSelectAlphaBIOS: () -> Void
     let onSelectBIOS: (URL) -> Void
-    let onRevertDefault: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var showingBIOSPicker = false
+    @State private var gamepadExpanded = false
 
     var body: some View {
         NavigationStack {
@@ -405,37 +431,30 @@ struct SettingsView: View {
                 // BIOS ROM 選択
                 Section {
                     HStack {
-                        Text("Current BIOS")
-                        Spacer()
-                        Text(biosName)
-                            .foregroundColor(.secondary)
+                        Label(biosName, systemImage: "cpu")
                             .lineLimit(1)
-                    }
+                        Spacer()
+                        Menu {
+                            Button {
+                                onSelectAlphaBIOS()
+                            } label: {
+                                Label("α-BIOS (Fast Boot)", systemImage: "bolt.fill")
+                            }
+                            .disabled(biosName == "α-BIOS")
 
-                    if biosName != "α-BIOS" {
-                        Button {
-                            onSelectAlphaBIOS()
+                            Button {
+                                showingBIOSPicker = true
+                            } label: {
+                                Label("Select ROM File…", systemImage: "doc.badge.plus")
+                            }
                         } label: {
-                            Label("α-BIOS (Fast Boot)", systemImage: "bolt.fill")
+                            Image(systemName: "ellipsis.circle")
+                                .font(.title3)
+                                .foregroundColor(.accentColor)
                         }
-                    }
-
-                    Button {
-                        showingBIOSPicker = true
-                    } label: {
-                        Label("Select BIOS ROM…", systemImage: "doc.badge.plus")
-                    }
-
-                    if biosName != "Default BIOS" {
-                        Button {
-                            onRevertDefault()
-                        } label: {
-                            Label("Revert to Default BIOS", systemImage: "arrow.uturn.backward")
-                        }
-                        .foregroundColor(.orange)
                     }
                 } header: {
-                    Text("BIOS ROM")
+                    Text("BIOS")
                 }
 
                 // ゲーム速度（スライダー）
@@ -463,37 +482,35 @@ struct SettingsView: View {
                     Text("Game Speed")
                 }
 
-                // キーセット選択
+                // ゲームパッド設定（折りたたみ可能）
                 Section {
-                    Picker("Key Set", selection: $config.keySet) {
-                        ForEach(GamepadKeySet.allCases, id: \.self) { set in
-                            Text(set.label).tag(set)
+                    DisclosureGroup(isExpanded: $gamepadExpanded) {
+                        // キーセット選択
+                        Picker("Pad Type", selection: $config.keySet) {
+                            ForEach(GamepadKeySet.allCases, id: \.self) { set in
+                                Text(set.label).tag(set)
+                            }
                         }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                } header: {
-                    Text("Gamepad (Landscape)")
-                }
 
-                // ボタン割り当て・連射
-                Section {
-                    buttonRow("Button 1", key: $config.button1Key, turbo: $config.button1Turbo)
-                    buttonRow("Button 2", key: $config.button2Key, turbo: $config.button2Turbo)
-                    if config.keySet == .setC {
-                        buttonRow("Button 3", key: $config.button3Key, turbo: $config.button3Turbo)
-                        buttonRow("Button 4", key: $config.button4Key, turbo: $config.button4Turbo)
-                    }
-                } header: {
-                    Text("Button Mapping / Turbo")
-                }
-
-                // サポートタイトル
-                Section {
-                    NavigationLink {
-                        SupportTitlesView()
+                        // ボタン割り当て・連射
+                        buttonRow("Btn 1", key: $config.button1Key, turbo: $config.button1Turbo)
+                        buttonRow("Btn 2", key: $config.button2Key, turbo: $config.button2Turbo)
+                        if config.keySet.buttonCount >= 4 {
+                            buttonRow("Btn 3", key: $config.button3Key, turbo: $config.button3Turbo)
+                            buttonRow("Btn 4", key: $config.button4Key, turbo: $config.button4Turbo)
+                        }
+                        if config.keySet.buttonCount >= 6 {
+                            buttonRow("Btn 5", key: $config.button5Key, turbo: $config.button5Turbo)
+                            buttonRow("Btn 6", key: $config.button6Key, turbo: $config.button6Turbo)
+                        }
                     } label: {
-                        Label("Support Titles", systemImage: "list.star")
+                        HStack {
+                            Label("Gamepad", systemImage: "gamecontroller")
+                            Spacer()
+                            Text(config.keySet.label)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
 
@@ -516,6 +533,18 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .listRowBackground(Color.clear)
+
+                    NavigationLink {
+                        AboutView()
+                    } label: {
+                        Label("About EMuSX", systemImage: "info.circle")
+                    }
+
+                    NavigationLink {
+                        SupportTitlesView()
+                    } label: {
+                        Label("Support Titles", systemImage: "list.star")
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -572,10 +601,13 @@ struct EmulatorView: View {
             }
         }
         .ignoresSafeArea()
-        .sheet(isPresented: $viewModel.showingFilePicker) {
+        .sheet(isPresented: $viewModel.showingFilePicker, onDismiss: {
+            viewModel.onFilePickerDismiss()
+        }) {
             DocumentPicker(
                 types: [.init(filenameExtension: "rom")!,
                         .init(filenameExtension: "bin")!,
+                        .init(filenameExtension: "dsk")!,
                         UTType.data],
                 onPick: { viewModel.handleFilePick($0) }
             )
@@ -586,8 +618,7 @@ struct EmulatorView: View {
                 config: viewModel.gamepadConfig,
                 biosName: $viewModel.biosName,
                 onSelectAlphaBIOS: { viewModel.switchToAlphaBIOS() },
-                onSelectBIOS: { viewModel.handleBIOSPick($0) },
-                onRevertDefault: { viewModel.revertToDefaultBIOS() }
+                onSelectBIOS: { viewModel.handleBIOSPick($0) }
             )
             .presentationDetents([.large])
         }
@@ -879,7 +910,7 @@ struct EmulatorView: View {
                 .font(.caption)
                 .multilineTextAlignment(.center)
             Button("Open ROM") {
-                viewModel.showingFilePicker = true
+                viewModel.openFilePicker()
             }
             .buttonStyle(.borderedProminent)
             .tint(.green)
@@ -889,7 +920,15 @@ struct EmulatorView: View {
     private var controlBar: some View {
         HStack(spacing: 20) {
             Button {
-                viewModel.showingFilePicker = true
+                viewModel.openSettings()
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 20))
+            }
+            .tint(.white.opacity(0.7))
+
+            Button {
+                viewModel.openFilePicker()
             } label: {
                 Image(systemName: "tray.and.arrow.down")
                     .font(.system(size: 20))
@@ -937,7 +976,7 @@ final class EmulatorViewModel: ObservableObject {
         didSet { applySpeed() }
     }
     @Published var showingFilePicker = false
-    @Published var biosName: String = MSXMachine.savedBIOSName ?? "Default BIOS"
+    @Published var biosName: String = MSXMachine.savedBIOSName ?? "α-BIOS"
     @Published var showError        = false
     @Published var errorMessage     = ""
     @Published var isRunning        = false
@@ -973,6 +1012,30 @@ final class EmulatorViewModel: ObservableObject {
     func togglePause() {
         isRunning.toggle()
         if isRunning { machine.start() } else { machine.stop() }
+    }
+
+    /// ファイルピッカーを開く（自動的に一時停止する）
+    /// wasRunningBeforePicker: ピッカー表示前に動作中だったかを記録
+    private var wasRunningBeforePicker = false
+
+    func openFilePicker() {
+        wasRunningBeforePicker = isRunning
+        if isRunning {
+            isRunning = false
+            machine.stop()
+        }
+        showingFilePicker = true
+    }
+
+    /// ファイルピッカーが閉じた時（キャンセル含む）に元の状態を復帰
+    func onFilePickerDismiss() {
+        // handleFilePick() 内で isRunning=true / machine.start() が
+        // 呼ばれなかった場合（キャンセル時）のみ復帰
+        if wasRunningBeforePicker && !isRunning {
+            isRunning = true
+            machine.start()
+        }
+        wasRunningBeforePicker = false
     }
 
     /// 設定を開く（自動的に一時停止する）
@@ -1048,7 +1111,21 @@ final class EmulatorViewModel: ObservableObject {
             } else {
                 let name = url.deletingPathExtension().lastPathComponent
                 machine.cartridgeName = name
-                let ok = machine.loadCartridge(data: data)
+
+                let ext = url.pathExtension.lowercased()
+                let supportedExts = ["rom", "bin", "zip", "dsk"]
+                guard supportedExts.contains(ext) else {
+                    showError(message: "非対応の拡張子です: .\(ext)\n対応形式: .rom / .bin / .zip / .dsk")
+                    return
+                }
+
+                let ok: Bool
+                if ext == "dsk" {
+                    ok = machine.loadDisk(data: data)
+                } else {
+                    ok = machine.loadCartridge(data: data)
+                }
+
                 if ok {
                     machine.reset()
                     loadedCartridge = true
@@ -1058,7 +1135,11 @@ final class EmulatorViewModel: ObservableObject {
                         machine.start()
                     }
                 } else {
-                    showError(message: "No cartridge found.")
+                    if ext == "dsk" {
+                        showError(message: "Invalid disk image.")
+                    } else {
+                        showError(message: "No cartridge found.")
+                    }
                 }
             }
         } catch {
@@ -1108,21 +1189,6 @@ final class EmulatorViewModel: ObservableObject {
         isRunning = true
         machine.start()
         showSplash = false  // α-BIOS は高速ブート
-    }
-
-    func revertToDefaultBIOS() {
-        if isRunning {
-            isRunning = false
-            machine.stop()
-        }
-
-        machine.revertToDefaultBIOS()
-        biosName = "Default BIOS"
-
-        machine.reset()
-        isRunning = true
-        machine.start()
-        showSplash = true  // C-BIOS ブート画面を隠す（onGameReady で解除）
     }
 
     private func showError(message: String) {

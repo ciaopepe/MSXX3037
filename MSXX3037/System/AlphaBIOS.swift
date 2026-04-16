@@ -230,25 +230,104 @@ enum AlphaBIOS {
         // HL=VRAM 上の位置。CLS の部分処理だが、スタブとして RET。
         writeRET(&rom, at: 0x0168)
 
-        // --- 0x016B BIGFIL: 大容量 VRAM 塗りつぶし ---
-        // MSX2 の 128KB VRAM 対応版 FILVRM。MSX1 VDP では FILVRM へ転送。
-        // 入力: HL=VRAM アドレス, BC=長さ, A=データ → FILVRM と同じ
-        writeJP(&rom, at: 0x016B, to: 0x0056)  // → FILVRM
+        // --- 0x016B-0x0177: 17bit VRAM アドレス対応スタブ ---
+        // MSX2 の 128KB VRAM は 17bit アドレス。HL の上位 2 ビットを
+        // R#14 (VRAM アドレス上位 3bit) に設定してからアクセスする。
+        // MSX1 版 (SETRD/SETWRT 等) は R#14 を設定しないため、
+        // 16KB 境界を超えるアクセスが正しく動作しなかった。
+        //
+        // メモリマップ (0x3F70-0x3FB6 に Z80 スタブを配置):
+        //   0x3F70: NSTWRT - VRAM 書きアドレス設定 (22 bytes → 0x3F85)
+        //   0x3F86: NSETRD - VRAM 読みアドレス設定 (20 bytes → 0x3F99)
+        //   0x3F9A: NRDVRM - VRAM 1 バイト読み (6 bytes → 0x3F9F)
+        //   0x3FA0: NWRVRM - VRAM 1 バイト書き (8 bytes → 0x3FA7)
+        //   0x3FA8: BIGFIL - VRAM 塗りつぶし (15 bytes → 0x3FB6)
 
-        // --- 0x016E NSETRD: 拡張 VRAM 読みアドレス設定 ---
-        // MSX2 の 17bit アドレス対応。MSX1 VDP では上位ビット無視→ SETRD。
-        writeJP(&rom, at: 0x016E, to: 0x0050)  // → SETRD
+        // ── NSTWRT (0x3F70): Set VRAM write address with R#14 ──
+        // Input: HL = 16bit VRAM address
+        // HL[15:14] → R#14[1:0], HL[13:0] → VDP address latch (write mode)
+        let nstwrtStub: [UInt8] = [
+            0x7C,                   // LD A, H
+            0x07,                   // RLCA
+            0x07,                   // RLCA
+            0xE6, 0x07,             // AND 0x07       ; extract bits 15-14 → R#14
+            0xD3, 0x99,             // OUT (0x99), A  ; R#14 data
+            0x3E, 0x8E,             // LD A, 0x8E     ; 0x80 | 14
+            0xD3, 0x99,             // OUT (0x99), A  ; write R#14
+            0x7D,                   // LD A, L
+            0xD3, 0x99,             // OUT (0x99), A  ; address low byte
+            0x7C,                   // LD A, H
+            0xE6, 0x3F,             // AND 0x3F       ; mask to 6 bits
+            0xF6, 0x40,             // OR 0x40        ; set write mode bit
+            0xD3, 0x99,             // OUT (0x99), A  ; address high byte
+            0xC9,                   // RET
+        ]
+        writeBytes(&rom, at: 0x3F70, bytes: nstwrtStub)
+        writeJP(&rom, at: 0x0171, to: 0x3F70)
 
-        // --- 0x0171 NSTWRT: 拡張 VRAM 書きアドレス設定 ---
-        writeJP(&rom, at: 0x0171, to: 0x0053)  // → SETWRT
+        // ── NSETRD (0x3F86): Set VRAM read address with R#14 ──
+        // Input: HL = 16bit VRAM address
+        let nsetrdStub: [UInt8] = [
+            0x7C,                   // LD A, H
+            0x07,                   // RLCA
+            0x07,                   // RLCA
+            0xE6, 0x07,             // AND 0x07
+            0xD3, 0x99,             // OUT (0x99), A  ; R#14 data
+            0x3E, 0x8E,             // LD A, 0x8E
+            0xD3, 0x99,             // OUT (0x99), A  ; write R#14
+            0x7D,                   // LD A, L
+            0xD3, 0x99,             // OUT (0x99), A  ; address low byte
+            0x7C,                   // LD A, H
+            0xE6, 0x3F,             // AND 0x3F       ; read mode (bit 6 = 0)
+            0xD3, 0x99,             // OUT (0x99), A  ; address high byte
+            0xC9,                   // RET
+        ]
+        writeBytes(&rom, at: 0x3F86, bytes: nsetrdStub)
+        writeJP(&rom, at: 0x016E, to: 0x3F86)
 
-        // --- 0x0174 NRDVRM: 拡張 VRAM 読み込み ---
-        // HL=VRAM アドレス → A=データ。MSX1 VDP → RDVRM。
-        writeJP(&rom, at: 0x0174, to: 0x004A)  // → RDVRM
+        // ── NRDVRM (0x3F9A): Read 1 byte from VRAM ──
+        // Input: HL = VRAM address → Output: A = data
+        let nrdvrmStub: [UInt8] = [
+            0xCD, 0x86, 0x3F,       // CALL 0x3F86   ; NSETRD (pre-reads into buffer)
+            0xDB, 0x98,             // IN A, (0x98)  ; read pre-buffered byte
+            0xC9,                   // RET
+        ]
+        writeBytes(&rom, at: 0x3F9A, bytes: nrdvrmStub)
+        writeJP(&rom, at: 0x0174, to: 0x3F9A)
 
-        // --- 0x0177 NWRVRM: 拡張 VRAM 書き込み ---
-        // HL=VRAM アドレス, A=データ。MSX1 VDP → WRTVRM。
-        writeJP(&rom, at: 0x0177, to: 0x004D)  // → WRTVRM
+        // ── NWRVRM (0x3FA0): Write 1 byte to VRAM ──
+        // Input: HL = VRAM address, A = data
+        let nwrvrmStub: [UInt8] = [
+            0xF5,                   // PUSH AF        ; save data byte
+            0xCD, 0x70, 0x3F,       // CALL 0x3F70   ; NSTWRT
+            0xF1,                   // POP AF         ; restore data
+            0xD3, 0x98,             // OUT (0x98), A  ; write to VRAM
+            0xC9,                   // RET
+        ]
+        writeBytes(&rom, at: 0x3FA0, bytes: nwrvrmStub)
+        writeJP(&rom, at: 0x0177, to: 0x3FA0)
+
+        // ── BIGFIL (0x3FA8): Fill VRAM area ──
+        // Input: HL = start address, BC = length, A = fill value
+        // NSTWRT で R#14 + address latch を設定後、連続 OUT で塗りつぶす。
+        // VDP は OUT 毎にアドレスを自動インクリメントし、
+        // 16KB 境界では R#14 も自動インクリメントされる。
+        let bigfilStub: [UInt8] = [
+            0xF5,                   // PUSH AF        ; save fill value
+            0xCD, 0x70, 0x3F,       // CALL 0x3F70   ; NSTWRT
+            0xF1,                   // POP AF         ; restore fill value
+            // loop (0x3FAD):
+            0xD3, 0x98,             // OUT (0x98), A  ; write byte (auto-increment)
+            0x0B,                   // DEC BC
+            0x57,                   // LD D, A        ; save fill value
+            0x78,                   // LD A, B
+            0xB1,                   // OR C           ; BC == 0?
+            0x7A,                   // LD A, D        ; restore fill value
+            0x20, 0xF7,             // JR NZ, -9      ; → 0x3FAD
+            0xC9,                   // RET
+        ]
+        writeBytes(&rom, at: 0x3FA8, bytes: bigfilStub)
+        writeJP(&rom, at: 0x016B, to: 0x3FA8)
 
         // --- 0x017A RDRES: RESET ポート読み込み (MSX2+) ---
         // A=0 を返す
@@ -439,6 +518,126 @@ enum AlphaBIOS {
             print(String(format: "[Patch 10] CHGMOD bytes mismatch: %02X %02X %02X (expected FE 04 D0)",
                          rom[0x02AD], rom[0x02AE], rom[0x02AF]))
         }
+
+        // ── Patch 12: 17bit VRAM アドレス対応 (NSTWRT/NSETRD/NRDVRM/NWRVRM/BIGFIL) ──
+        // MSX2 ゲームは NSTWRT (0x0171) 等の拡張 BIOS を使用して VRAM にアクセスする。
+        // C-BIOS MSX1 にはこれらのエントリポイントが存在しないため、
+        // R#14 を設定する 17bit アドレス対応スタブを書き込む。
+        // α-BIOS の generate() でも同じスタブを配置するが、Default BIOS にも適用。
+        //
+        // 配置先: 0x3F70-0x3FAE (CHGMOD パッチ 0x3F30-0x3F68 の後の空き領域)
+
+        // NSTWRT (0x3F70): HL → R#14 + address latch (write mode)
+        let nstwrtFix: [UInt8] = [
+            0x7C, 0x07, 0x07, 0xE6, 0x07, 0xD3, 0x99,
+            0x3E, 0x8E, 0xD3, 0x99,
+            0x7D, 0xD3, 0x99,
+            0x7C, 0xE6, 0x3F, 0xF6, 0x40, 0xD3, 0x99,
+            0xC9,
+        ]
+        writeBytes(&rom, at: 0x3F70, bytes: nstwrtFix)
+        // NSETRD (0x3F86): HL → R#14 + address latch (read mode)
+        let nsetrdFix: [UInt8] = [
+            0x7C, 0x07, 0x07, 0xE6, 0x07, 0xD3, 0x99,
+            0x3E, 0x8E, 0xD3, 0x99,
+            0x7D, 0xD3, 0x99,
+            0x7C, 0xE6, 0x3F, 0xD3, 0x99,
+            0xC9,
+        ]
+        writeBytes(&rom, at: 0x3F86, bytes: nsetrdFix)
+        // NRDVRM (0x3F9A): CALL NSETRD + IN A,(0x98)
+        writeBytes(&rom, at: 0x3F9A, bytes: [0xCD, 0x86, 0x3F, 0xDB, 0x98, 0xC9])
+        // NWRVRM (0x3FA0): PUSH AF + CALL NSTWRT + POP AF + OUT (0x98),A
+        writeBytes(&rom, at: 0x3FA0, bytes: [0xF5, 0xCD, 0x70, 0x3F, 0xF1, 0xD3, 0x98, 0xC9])
+        // BIGFIL (0x3FA8): PUSH AF + CALL NSTWRT + POP AF + loop OUT
+        writeBytes(&rom, at: 0x3FA8, bytes: [
+            0xF5, 0xCD, 0x70, 0x3F, 0xF1,
+            0xD3, 0x98, 0x0B, 0x57, 0x78, 0xB1, 0x7A, 0x20, 0xF7, 0xC9,
+        ])
+
+        // エントリポイントの JP 書き換え
+        // C-BIOS MSX1 では 0x016B-0x0177 は内部コードの一部だが、
+        // MSX2 として動作させるため MSX2 BIOS エントリポイントとして上書きする。
+        writeJP(&rom, at: 0x016B, to: 0x3FA8)  // BIGFIL
+        writeJP(&rom, at: 0x016E, to: 0x3F86)  // NSETRD
+        writeJP(&rom, at: 0x0171, to: 0x3F70)  // NSTWRT
+        writeJP(&rom, at: 0x0174, to: 0x3F9A)  // NRDVRM
+        writeJP(&rom, at: 0x0177, to: 0x3FA0)  // NWRVRM
+        print("[Patch 12] 17bit VRAM stubs applied at 0x3F70-0x3FB7")
+
+        // ── Patch 13: SETWRT/SETRD に R#14=0 リセットラッパー追加 ──
+        // MSX2 ゲームが NSTWRT 等で R#14 を変更した後、C-BIOS の MSX1 版
+        // SETWRT (0x0053) / SETRD (0x0050) が R#14 をリセットしないため、
+        // fullAddress = (stale_R14 << 14) | addressLatch で間違ったバンクに
+        // VRAM アクセスしてしまう。
+        //
+        // 修正: 0x0050 / 0x0053 の JP ターゲットをラッパーにリダイレクトし、
+        // R#14=0 を書き込んでから元の実装にジャンプする。
+        //
+        // 配置先: 0x3FC0 (SETRD wrapper, 11 bytes), 0x3FCB (SETWRT wrapper, 11 bytes)
+        //
+        // ラッパーコード (各11バイト):
+        //   LD A, 0x00      ; 3E 00
+        //   OUT (0x99), A   ; D3 99   ; R#14 data = 0
+        //   LD A, 0x8E      ; 3E 8E   ; 0x80 | 14
+        //   OUT (0x99), A   ; D3 99   ; write R#14
+        //   JP original     ; C3 xx xx
+
+        // SETRD (0x0050) ラッパー
+        if rom[0x0050] == 0xC3 {
+            let origLo = rom[0x0051]
+            let origHi = rom[0x0052]
+            let setrdWrapper: [UInt8] = [
+                0x3E, 0x00,         // LD A, 0x00
+                0xD3, 0x99,         // OUT (0x99), A
+                0x3E, 0x8E,         // LD A, 0x8E
+                0xD3, 0x99,         // OUT (0x99), A
+                0xC3, origLo, origHi, // JP original SETRD
+            ]
+            writeBytes(&rom, at: 0x3FC0, bytes: setrdWrapper)
+            writeJP(&rom, at: 0x0050, to: 0x3FC0)
+            print("[Patch 13] SETRD R#14 reset wrapper at 0x3FC0 → orig 0x\(String(format: "%04X", Int(origHi) << 8 | Int(origLo)))")
+        }
+
+        // SETWRT (0x0053) ラッパー
+        if rom[0x0053] == 0xC3 {
+            let origLo = rom[0x0054]
+            let origHi = rom[0x0055]
+            let setwrtWrapper: [UInt8] = [
+                0x3E, 0x00,         // LD A, 0x00
+                0xD3, 0x99,         // OUT (0x99), A
+                0x3E, 0x8E,         // LD A, 0x8E
+                0xD3, 0x99,         // OUT (0x99), A
+                0xC3, origLo, origHi, // JP original SETWRT
+            ]
+            writeBytes(&rom, at: 0x3FCB, bytes: setwrtWrapper)
+            writeJP(&rom, at: 0x0053, to: 0x3FCB)
+            print("[Patch 13] SETWRT R#14 reset wrapper at 0x3FCB → orig 0x\(String(format: "%04X", Int(origHi) << 8 | Int(origLo)))")
+        }
+    }
+
+    // MARK: - Disk ROM Stub Generator
+
+    /// スロット2ページ1 (0x4000-0x7FFF) に配置する Disk ROM スタブを生成する。
+    /// AB ヘッダ付き 16KB ROM。各エントリポイントは RET (0xC9) のみで、
+    /// 実際のディスク I/O は MSXMachine の PC フックで処理する。
+    static func generateDiskROM() -> [UInt8] {
+        var rom = [UInt8](repeating: 0xFF, count: 0x4000)  // 16KB
+
+        // ── AB ヘッダなし ──
+        // C-BIOS のスロットスキャンに検出させない。
+        // ディスクブートは MSXMachine がフレームカウンタで直接行う。
+
+        // ── Disk BIOS entry points (PC hooked by MSXMachine) ──
+        // ブートセクタコードがインタースロットCALLでアクセスする。
+        rom[0x0010] = 0xC9  // DSKIO   @ 0x4010 — sector read/write
+        rom[0x0013] = 0xC9  // DSKCHG  @ 0x4013 — disk change check
+        rom[0x0016] = 0xC9  // GETDPB  @ 0x4016 — get disk parameter block
+        rom[0x0019] = 0xC9  // CHOICE  @ 0x4019 — format choice string
+        rom[0x001C] = 0xC9  // DSKFMT  @ 0x401C — format disk
+        rom[0x001F] = 0xC9  // MTOFF   @ 0x401F — motor off
+
+        return rom
     }
 
     // MARK: - Z80 Code Helpers

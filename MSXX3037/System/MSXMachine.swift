@@ -9,6 +9,21 @@ final class MSXMachine {
     let vdp = VDP()
     let psg = PSG()
     let memory = MSXMemory()
+    let fdc = FDC()
+
+    // MARK: - Disk System
+    var diskMode = false                // true when .dsk is loaded (vs cartridge mode)
+    private let diskROMSlot = 1         // Disk ROM stub goes in slot 1 (C-BIOS scans slot 1 first)
+
+    // Disk ROM hook addresses (page 1: 0x4000+offset)
+    private let dskioAddr:    UInt16 = 0x4010
+    private let dskchgAddr:   UInt16 = 0x4013
+    private let getdpbAddr:   UInt16 = 0x4016
+    private let mtoffAddr:    UInt16 = 0x401F
+
+    // Frame-based disk boot: C-BIOS 初期化完了後にブートセクタを直接ロード
+    private var diskBootPending = false
+    private let diskBootFrame = 25  // C-BIOS が VDP/RAM 初期化を完了する十分なフレーム数
 
     // MARK: - Timing
     static let cpuHz: Double = 3579545.0   // 3.58 MHz
@@ -78,7 +93,7 @@ final class MSXMachine {
         return dir
     }
 
-    /// 保存されたBIOS名（nil = Default BIOS）
+    /// 保存されたBIOS名（nil = α-BIOS（デフォルト））
     static var savedBIOSName: String? {
         UserDefaults.standard.string(forKey: "customBIOSName")
     }
@@ -87,10 +102,7 @@ final class MSXMachine {
     init() {
         connectComponents()
         let saved = MSXMachine.savedBIOSName
-        if saved == "α-BIOS" {
-            // α-BIOS を生成してロード
-            loadAlphaBIOSInternal()
-        } else if saved != nil, let customData = loadSavedCustomBIOS() {
+        if saved != nil && saved != "α-BIOS", let customData = loadSavedCustomBIOS() {
             // ユーザー指定カスタム BIOS
             let bytes = [UInt8](customData)
             memory.loadROM(bytes, slot: 0)
@@ -98,7 +110,8 @@ final class MSXMachine {
             romLoaded = true
             print("Custom BIOS loaded: \(saved ?? "?") (\(customData.count) bytes)")
         } else {
-            loadBundledCBIOS()
+            // デフォルト: α-BIOS を生成してロード
+            loadAlphaBIOSInternal()
         }
 
         // ── DEBUG: Documents/ にある .rom を自動ロード ──
@@ -159,19 +172,7 @@ final class MSXMachine {
         print("Custom BIOS loaded: \(name) (\(data.count) bytes)")
     }
 
-    /// Default BIOS (C-BIOS) に戻す
-    func revertToDefaultBIOS() {
-        // カスタムBIOSファイルを削除
-        let fileURL = MSXMachine.biosDirectory.appendingPathComponent("custom_bios.rom")
-        try? FileManager.default.removeItem(at: fileURL)
-        UserDefaults.standard.removeObject(forKey: "customBIOSName")
-
-        // バンドルC-BIOSを再ロード
-        memory.slots[0] = nil
-        loadBundledCBIOS()
-    }
-
-    // MARK: - Auto-load bundled C-BIOS
+    // MARK: - Auto-load bundled C-BIOS (α-BIOS 生成失敗時のフォールバック)
     private func loadBundledCBIOS() {
         guard let mainURL = Bundle.main.url(forResource: "cbios_main_msx1", withExtension: "rom"),
               let logoURL = Bundle.main.url(forResource: "cbios_logo_msx1", withExtension: "rom") else {
@@ -402,6 +403,13 @@ final class MSXMachine {
             romData = data
         }
 
+        // Clear disk mode BEFORE loading cartridge (disk ROM is in same slot 1)
+        if diskMode {
+            diskMode = false
+            fdc.ejectDisk()
+            // Don't nil out slots here — loadCartridge below will overwrite slot 1
+        }
+
         let bytes = [UInt8](romData)
         memory.loadCartridge(bytes, slot: slot)
 
@@ -426,6 +434,38 @@ final class MSXMachine {
         // reset() will set primarySlotReg = 0x00 so C-BIOS
         // performs its own slot scan and detects the cartridge.
         cartridgeLoaded = true
+        return true
+    }
+
+    // MARK: - Disk Image Loading
+
+    /// .dsk ファイルを読み込む。成功なら true を返す。
+    @discardableResult
+    func loadDisk(data: Data) -> Bool {
+        let bytes = [UInt8](data)
+
+        guard fdc.loadDisk(bytes) else {
+            print("[Disk] Failed to load disk image (\(bytes.count) bytes)")
+            return false
+        }
+
+        // Clear any cartridge / MegaROM data first
+        memory.clearMegaROM()
+        // Clear slot 2 in case it had old data
+        memory.slots[2] = nil
+
+        // Generate Disk ROM stub and load into slot 1
+        let diskROM = AlphaBIOS.generateDiskROM()
+        var slotData = [UInt8](repeating: 0xFF, count: 0x10000)
+        for i in 0..<diskROM.count {
+            slotData[0x4000 + i] = diskROM[i]
+        }
+        memory.slots[diskROMSlot] = slotData
+
+        diskMode = true
+        diskBootPending = true
+        cartridgeLoaded = true
+        print("[Disk] Disk mode enabled, Disk ROM stub loaded in slot \(diskROMSlot)")
         return true
     }
 
@@ -753,6 +793,18 @@ final class MSXMachine {
         vdp.debugPixelCount = false
         vdp.debugSpriteSAT  = false
         vdp.debugRenderGFX4 = false
+
+        // Disk mode: re-install Disk ROM stub in slot 1 (RAM was cleared above)
+        if diskMode {
+            let diskROM = AlphaBIOS.generateDiskROM()
+            var slotData = [UInt8](repeating: 0xFF, count: 0x10000)
+            for i in 0..<diskROM.count {
+                slotData[0x4000 + i] = diskROM[i]
+            }
+            memory.slots[diskROMSlot] = slotData
+            diskBootPending = true  // リセット後に再度ディスクブートを行う
+        }
+
         cpu.reset()
     }
 
@@ -761,6 +813,14 @@ final class MSXMachine {
         guard isRunning else { return }
 
         frameCount += 1
+
+        // ── Frame-based disk boot ──
+        // C-BIOS が VDP/RAM 初期化を完了した後にブートセクタを直接ロードして実行。
+        // AB ヘッダを使わないので C-BIOS のスロットスキャンに干渉しない。
+        if diskMode && diskBootPending && frameCount == diskBootFrame {
+            diskBootPending = false
+            performDiskBoot()
+        }
 
         // C-BIOSは常に frame ~160 でゲームに制御を渡す（決定論的）
         // frame 165 でスプラッシュを解除すると最初のゲームフレームが確実に描画済みになる
@@ -984,6 +1044,66 @@ final class MSXMachine {
             print(String(format: "[VRAM SCAN @%d] %@", frameCount, blockSummary.joined(separator: " ")))
         }
 
+        // ── Display page & VRAM content diagnostic (SCREEN 5 games) ──
+        if cartridgeLoaded && (frameCount == 1200 || frameCount == 1800) {
+            let mode = vdp.screenMode
+            if mode == .graphic4 || mode == .graphic5 || mode == .graphic6 || mode == .graphic7 {
+                let r0 = vdp.regs[0], r1 = vdp.regs[1], r2 = vdp.regs[2]
+                let r8 = vdp.regs[8], r9 = vdp.regs[9], r14 = vdp.regs[14], r23 = vdp.regs[23]
+                let page = (Int(r2) >> 5) & 0x03
+                let pageOff = page * 0x08000
+                let scroll = Int(r23)
+
+                print(String(format: "[GFX DIAG @%d] mode=%@ R#0=%02X R#1=%02X R#2=%02X(page=%d) R#8=%02X R#9=%02X R#14=%02X R#23=%02X(scroll=%d)",
+                             frameCount, "\(mode)", r0, r1, r2, page, r8, r9, r14, scroll))
+
+                // Count non-zero bytes in displayed VRAM area
+                let bpr = vdp.bytesPerPixelRow
+                let lines = vdp.activeLines
+                var nzTotal = 0, nzTop = 0, nzMid = 0, nzBot = 0
+                for y in 0..<lines {
+                    let vramY = (y + scroll) & 0xFF
+                    let rowBase = pageOff + vramY * bpr
+                    for x in 0..<bpr {
+                        if vdp.vram[(rowBase + x) & (VDP.vramSize - 1)] != 0 {
+                            nzTotal += 1
+                            if y < 64 { nzTop += 1 }
+                            else if y < 148 { nzMid += 1 }
+                            else { nzBot += 1 }
+                        }
+                    }
+                }
+                print(String(format: "[GFX DIAG @%d] displayVRAM non-zero: total=%d top(0-63)=%d mid(64-147)=%d bot(148-%d)=%d / %d bytes",
+                             frameCount, nzTotal, nzTop, nzMid, lines-1, nzBot, lines * bpr))
+
+                // Dump a few VRAM rows from display center
+                let midY = (106 + scroll) & 0xFF
+                let midBase = pageOff + midY * bpr
+                let row = (0..<32).map { String(format: "%02X", vdp.vram[(midBase + $0) & (VDP.vramSize - 1)]) }
+                print(String(format: "[GFX DIAG @%d] VRAM row y=%d (display y=106): %@",
+                             frameCount, midY, row.joined(separator: " ")))
+
+                // Also check page 1 (where tile bank might be)
+                var nzPage1 = 0
+                for i in 0..<0x8000 {
+                    if vdp.vram[(0x08000 + i) & (VDP.vramSize - 1)] != 0 { nzPage1 += 1 }
+                }
+                print(String(format: "[GFX DIAG @%d] page1(0x08000-0x0FFFF) non-zero: %d/32768",
+                             frameCount, nzPage1))
+
+                // Palette dump
+                let pal = (0..<16).map { String(format: "%08X", vdp.palette[$0]) }.joined(separator: " ")
+                print(String(format: "[GFX DIAG @%d] palette: %@", frameCount, pal))
+
+                // R#14 value and VRAM direct write stats
+                print(String(format: "[GFX DIAG @%d] directWrites: page0=%d page1=%d reads: page0=%d page1=%d r14set=%@",
+                             frameCount,
+                             vdp.directWriteCountPage0, vdp.directWriteCountPage1,
+                             vdp.directReadCountPage0, vdp.directReadCountPage1,
+                             vdp.r14ExplicitlySet ? "YES" : "NO"))
+            }
+        }
+
         // ── White pixel diagnostic (SCREEN 5) ──
         // Scan visible VRAM area for color 15 (white) pixels to identify
         // the source of "diagonal white lines" artifact.
@@ -1107,8 +1227,19 @@ final class MSXMachine {
             var hist = [UInt16: Int]()
             for pc in pcTraceBuffer { hist[pc, default: 0] += 1 }
             let sorted = hist.sorted { $0.value > $1.value }.prefix(20)
-            var histStr = sorted.map { String(format: "%04X×%d", $0.key, $0.value) }
+            let histStr = sorted.map { String(format: "%04X×%d", $0.key, $0.value) }
             print("[TRACE] Top PCs: \(histStr.joined(separator: " "))")
+            pcTraceBuffer.removeAll()
+        }
+
+        // Dump PC trace at frame 175 (after game INIT should have run)
+        if cartridgeLoaded && frameCount == 175 && !pcTraceBuffer.isEmpty {
+            print("[TRACE @175] PC trace (\(pcTraceBuffer.count) samples, frames 170-175):")
+            var hist = [UInt16: Int]()
+            for pc in pcTraceBuffer { hist[pc, default: 0] += 1 }
+            let sorted = hist.sorted { $0.value > $1.value }.prefix(20)
+            let histStr = sorted.map { String(format: "%04X×%d", $0.key, $0.value) }
+            print("[TRACE @175] Top PCs: \(histStr.joined(separator: " "))")
             pcTraceBuffer.removeAll()
         }
 
@@ -1124,14 +1255,51 @@ final class MSXMachine {
             slotChangeLogEnabled = false  // stop logging
         }
 
-        // Late diagnostic disabled (game stuck at boot, not useful)
-        // if frameCount == 200 ... if frameCount == 3800 ...
+        // Late diagnostic: dump game state at frame 200/300 for games that seem stuck
+        if cartridgeLoaded && (frameCount == 200 || frameCount == 300) {
+            let mode = vdp.screenMode
+            let se = vdp.screenEnabled
+            // Count non-zero bytes in VRAM bitmap area (first 27KB = 212 lines × 128 bytes)
+            var vramNZ = 0
+            for i in 0..<(212 * 128) {
+                if vdp.vram[i] != 0 { vramNZ += 1 }
+            }
+            // VDP command engine stats
+            let cmdTotal = vdp.commandEngine.cmdCounts.reduce(0, +)
+            let hmmvCount = vdp.commandEngine.cmdCounts[0xC]
+            let hmmmCount = vdp.commandEngine.cmdCounts[0xD]
+            let lmmvCount = vdp.commandEngine.cmdCounts[0x8]
+            let lmmmCount = vdp.commandEngine.cmdCounts[0x9]
+            // H.TIMI hook state
+            let htimi0 = memory.ram[0xFD9F]
+            let htimi1 = memory.ram[0xFDA0]
+            let htimi2 = memory.ram[0xFDA1]
+            // Palette summary (count non-black entries)
+            var palNonBlack = 0
+            for i in 0..<16 { if vdp.palette[i] != 0x000000FF { palNonBlack += 1 } }
+            print(String(format: "[LATE DIAG @%d] PC=%04X SP=%04X SLOT=%02X mode=%@ screen=%@ banks=[%d,%d,%d,%d]",
+                         frameCount, cpu.PC, cpu.SP, memory.primarySlotReg,
+                         "\(mode)", se ? "ON" : "OFF",
+                         memory.megaROMBanks[0], memory.megaROMBanks[1],
+                         memory.megaROMBanks[2], memory.megaROMBanks[3]))
+            print(String(format: "[LATE DIAG @%d] R#0=%02X R#1=%02X R#2=%02X R#8=%02X R#9=%02X R#15=%02X R#17=%02X",
+                         frameCount, vdp.regs[0], vdp.regs[1], vdp.regs[2],
+                         vdp.regs[8], vdp.regs[9], vdp.regs[15], vdp.regs[17]))
+            print(String(format: "[LATE DIAG @%d] VRAM-NZ=%d/27136 cmds=%d (HMMV=%d HMMM=%d LMMV=%d LMMM=%d)",
+                         frameCount, vramNZ, cmdTotal, hmmvCount, hmmmCount, lmmvCount, lmmmCount))
+            print(String(format: "[LATE DIAG @%d] H.TIMI=%02X %02X %02X palNonBlack=%d IFF1=%d bankSW=%d indirectWr=%d",
+                         frameCount, htimi0, htimi1, htimi2, palNonBlack,
+                         cpu.IFF1 ? 1 : 0, memory.bankSwitchCount, vdp.indirectWriteCount))
+            // Palette dump
+            let palStr = (0..<16).map { String(format: "%08X", vdp.palette[$0]) }.joined(separator: " ")
+            print(String(format: "[LATE DIAG @%d] palette: %@", frameCount, palStr))
+        }
 
         // debugVDP is false by default; no need to turn off
 
         // Enable PC trace for specific frames to diagnose stuck loops
-        pcTraceEnabled = (frameCount >= 48 && frameCount <= 52) && cartridgeLoaded
-        if pcTraceEnabled && frameCount == 48 { pcTraceBuffer.removeAll() }
+        pcTraceEnabled = ((frameCount >= 48 && frameCount <= 52) || (frameCount >= 170 && frameCount <= 175)) && cartridgeLoaded
+        if pcTraceEnabled && (frameCount == 48 || frameCount == 170) { pcTraceBuffer.removeAll() }
 
         var cycles = 0
         let target = MSXMachine.cyclesPerFrame
@@ -1155,6 +1323,45 @@ final class MSXMachine {
             // Capture PC trace for diagnosis
             if pcTraceEnabled && pcTraceBuffer.count < pcTraceMaxSize {
                 pcTraceBuffer.append(cpu.PC)
+            }
+
+            // ── Disk BIOS PC hooks ──
+            // Intercept before cpu.step() executes the RET at hook addresses.
+            if diskMode {
+                let pc = cpu.PC
+
+                // Hook 1: PHYDIO (0x0144) — BIOS-level disk I/O entry point
+                // Boot sector code and MSX-DOS call PHYDIO in the BIOS (page 0, slot 0).
+                // Since C-BIOS doesn't implement PHYDIO, we intercept it here and
+                // route to our handleDSKIO() which reads/writes the .dsk image directly.
+                if pc == 0x0144 {
+                    let page0Slot = Int(memory.primarySlotReg & 0x03)
+                    if page0Slot == 0 {
+                        handleDSKIO()
+                        cycles += 100
+                        continue
+                    }
+                }
+
+                // Hook 2: Disk ROM entry points (page 1 mapped to diskROMSlot)
+                // ブートセクタコードがインタースロットCALLで DSKIO 等を呼ぶケース
+                if pc >= 0x4000 && pc < 0x4020 {
+                    let page1Slot = Int((memory.primarySlotReg >> 2) & 0x03)
+                    if page1Slot == diskROMSlot {
+                        var hooked = true
+                        switch pc {
+                        case dskioAddr:    handleDSKIO()
+                        case dskchgAddr:   handleDSKCHG()
+                        case getdpbAddr:   handleGETDPB()
+                        case mtoffAddr:    handleMTOFF()
+                        default:           hooked = false
+                        }
+                        if hooked {
+                            cycles += 100
+                            continue
+                        }
+                    }
+                }
             }
 
             // Detect when PC first reaches cartridge INIT address
@@ -1529,5 +1736,159 @@ final class MSXMachine {
         let url = saveURL(slot: slot)
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
         return attrs[.modificationDate] as? Date
+    }
+
+    // MARK: - Disk BIOS Hook Handlers
+
+    /// RET 命令をシミュレート: スタックからリターンアドレスを POP して PC に設定
+    private func diskRET() {
+        let lo = UInt16(memory.read(cpu.SP))
+        let hi = UInt16(memory.read(cpu.SP &+ 1))
+        cpu.SP = cpu.SP &+ 2
+        cpu.PC = (hi << 8) | lo
+    }
+
+    /// DSKIO — ディスクセクタ読み書き (最重要フック)
+    /// 入力: CF=0:読み出し/CF=1:書き込み, A=ドライブ, B=セクタ数,
+    ///       C=メディアID, DE=論理セクタ番号, HL=転送先RAMアドレス
+    /// 出力: CF=0:成功/CF=1:エラー, B=残セクタ数, A=エラーコード
+    private func handleDSKIO() {
+        let isWrite = cpu.flagC
+        let drive = cpu.A
+        let sectorCount = Int(cpu.B)
+        let startSector = Int(cpu.DE)
+        let bufferAddr = Int(cpu.HL)
+
+        // Drive 0 のみサポート
+        guard drive == 0, fdc.diskInserted else {
+            cpu.A = 2           // Not ready
+            cpu.B = UInt8(sectorCount)
+            cpu.flagC = true
+            diskRET()
+            return
+        }
+
+        if isWrite {
+            // RAM → Disk
+            var data = [UInt8]()
+            for i in 0..<(sectorCount * FDC.sectorSize) {
+                data.append(memory.ram[(bufferAddr + i) & 0xFFFF])
+            }
+            if fdc.writeSectors(startSector: startSector, data: data, count: sectorCount) {
+                cpu.B = 0
+                cpu.flagC = false
+            } else {
+                cpu.A = 6       // Seek error
+                cpu.B = UInt8(sectorCount)
+                cpu.flagC = true
+            }
+        } else {
+            // Disk → RAM
+            guard let data = fdc.readSectors(startSector: startSector, count: sectorCount) else {
+                cpu.A = 2       // Not ready
+                cpu.B = UInt8(sectorCount)
+                cpu.flagC = true
+                diskRET()
+                return
+            }
+            for (i, byte) in data.enumerated() {
+                memory.ram[(bufferAddr + i) & 0xFFFF] = byte
+            }
+            cpu.B = 0
+            cpu.flagC = false
+        }
+
+        if frameCount <= 300 {
+            print(String(format: "[DSKIO] %@ drive=%d sect=%d+%d buf=%04X → %@",
+                         isWrite ? "WRITE" : "READ", drive, startSector, sectorCount,
+                         bufferAddr, cpu.flagC ? "ERR" : "OK"))
+        }
+        diskRET()
+    }
+
+    /// DSKCHG — ディスク交換チェック
+    /// 出力: B=0:不明, B=1:未交換, B=0xFF(-1):交換済み, CF=0:成功
+    private func handleDSKCHG() {
+        if fdc.diskChanged {
+            cpu.B = 0xFF        // Disk changed
+            fdc.diskChanged = false
+        } else {
+            cpu.B = 0x01        // Not changed
+        }
+        cpu.flagC = false       // Success
+        diskRET()
+    }
+
+    /// GETDPB — Disk Parameter Block を返す (720KB 3.5" standard)
+    /// 出力: HL+1 以降に DPB データを書き込む
+    private func handleGETDPB() {
+        // DPB for 720KB double-sided double-density (MSX-DOS standard)
+        let dpb: [UInt8] = [
+            0xF9,                   // Media descriptor
+            0x00, 0x02,             // Sector size (512)
+            0x0F,                   // Directory mask
+            0x04,                   // Directory shift
+            0x01,                   // Cluster mask
+            0x02,                   // Cluster shift
+            0x01, 0x00,             // First FAT sector
+            0x02,                   // Number of FATs
+            0x70,                   // Max directory entries (112)
+            0x0E, 0x00,             // First data sector
+            0x5A, 0x02,             // Number of clusters + 1 (602)
+            0x03,                   // Sectors per FAT
+            0x07, 0x00,             // First directory sector
+        ]
+        // Write DPB starting at HL+1 (standard MSX convention)
+        let addr = Int(cpu.HL) + 1
+        for (i, byte) in dpb.enumerated() {
+            memory.ram[(addr + i) & 0xFFFF] = byte
+        }
+        cpu.flagC = false
+        diskRET()
+    }
+
+    /// MTOFF — モーターオフ (何もしない)
+    private func handleMTOFF() {
+        fdc.motorOn = false
+        diskRET()
+    }
+
+    /// performDiskBoot — C-BIOS 初期化完了後にブートセクタを直接ロードして実行
+    /// runFrame() からフレームカウンタで呼ばれる（AB ヘッダ不要・H.STKE 不要）。
+    private func performDiskBoot() {
+        guard let bootSector = fdc.readSector(logicalSector: 0) else {
+            print("[Disk Boot] ERROR: Cannot read boot sector")
+            return
+        }
+
+        // ── ディスクワークエリア変数の設定 ──
+        memory.ram[0xF341] = 3                      // RAMAD0: Page 0 RAM slot
+        memory.ram[0xF342] = 3                      // RAMAD1: Page 1 RAM slot
+        memory.ram[0xF343] = 3                      // RAMAD2: Page 2 RAM slot
+        memory.ram[0xF344] = 3                      // RAMAD3: Page 3 RAM slot
+        memory.ram[0xFB21] = UInt8(diskROMSlot)     // MASTER: Disk ROM slot number
+        memory.ram[0xF347] = 1                      // DEVICE count (1 drive)
+
+        // ブートセクタシグネチャチェック
+        let sig = bootSector[0]
+        if sig != 0xEB && sig != 0xE9 {
+            print(String(format: "[Disk Boot] WARNING: Non-standard boot signature 0x%02X (expected 0xEB/0xE9)", sig))
+        }
+
+        // ブートセクタを 0xC000 にコピー
+        for (i, byte) in bootSector.enumerated() {
+            memory.ram[0xC000 + i] = byte
+        }
+
+        // ── CPU 状態を設定してブートコードにジャンプ ──
+        // MSX 標準: ブートセクタは 0xC01E から実行される
+        // スロット: page 0=BIOS(0), page 1=DiskROM(1), page 2=RAM(3), page 3=RAM(3)
+        //          = 0b11_11_01_00 = 0xF4
+        cpu.SP = 0xF380
+        memory.primarySlotReg = UInt8(0xC0 | 0x30 | (diskROMSlot << 2) | 0x00)
+        cpu.PC = 0xC01E
+
+        print(String(format: "[Disk Boot] frame=%d Boot sector → 0xC000, jumping to 0xC01E (sig=0x%02X, SP=%04X, SLOT=%02X)",
+                     frameCount, sig, cpu.SP, memory.primarySlotReg))
     }
 }

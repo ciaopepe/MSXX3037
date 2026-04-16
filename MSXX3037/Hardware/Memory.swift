@@ -228,7 +228,8 @@ final class MSXMemory {
         0xB5C9B3BC: .ascii8,  // Ys III (J)
         0x7C539B3B: .ascii8,  // Final Fantasy (J)
         0x5B1084E0: .ascii8,  // Dragon Slayer IV (J)
-        0x37B1E108: .ascii8,  // Hydlide 3 (J)
+        0x37B1E108: .ascii8,  // Hydlide 3 (J) MSX1
+        0xC11F0E78: .ascii8,  // Hydlide 3 (J) MSX2 - The Space Memories
         0x85B06612: .ascii8,  // Xak (J)
         0xEC544C45: .ascii8,  // Andorogynus (J)
         0xA1B592B0: .ascii8,  // R-Type (J)
