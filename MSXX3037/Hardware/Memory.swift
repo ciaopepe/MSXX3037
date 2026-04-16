@@ -59,6 +59,13 @@ final class MSXMemory {
     var megaROMMapper: MegaROMMapper = .none
     /// Bank registers for MegaROM (4 banks covering 0x4000-0xBFFF)
     var megaROMBanks: [Int] = [0, 1, 2, 3]  // default: banks 0-3
+    /// Pre-computed base offsets into megaROMData for each bank slot.
+    /// Updated on bank switch. readMegaROM uses bankPtr[i] + offset for O(1) access.
+    var megaROMBankPtr: [Int] = [0, 0, 0, 0]
+    /// Bank size shift amount (13 for 8KB, 14 for 16KB) — avoids division in hot path
+    var megaROMBankShift: Int = 13
+    /// Bank offset mask (0x1FFF for 8KB, 0x3FFF for 16KB)
+    var megaROMOffsetMask: Int = 0x1FFF
     /// Slot number that holds the MegaROM cartridge
     var megaROMSlot: Int = -1
     /// Debug: bank switch counter
@@ -72,6 +79,9 @@ final class MSXMemory {
         megaROMData = nil
         megaROMMapper = .none
         megaROMBanks = [0, 1, 2, 3]
+        megaROMBankPtr = [0, 0, 0, 0]
+        megaROMBankShift = 13
+        megaROMOffsetMask = 0x1FFF
         megaROMSlot = -1
         bankSwitchCount = 0
         megaROMInitAddress = 0
@@ -93,6 +103,12 @@ final class MSXMemory {
             megaROMSlot = slot
             megaROMMapper = detectMapper(data)
             megaROMBanks = [0, 1, 2, 3]  // default power-on banks
+
+            // Pre-compute bank pointer parameters
+            let isAscii16 = (megaROMMapper == .ascii16)
+            megaROMBankShift = isAscii16 ? 14 : 13
+            megaROMOffsetMask = isAscii16 ? 0x3FFF : 0x1FFF
+            updateBankPtrs()
 
             // Store INIT address from cartridge header (for diagnostics).
             if data.count >= 4 && data[0] == 0x41 && data[1] == 0x42 {
@@ -316,32 +332,26 @@ final class MSXMemory {
         return 0xFF
     }
 
-    /// Read a byte from MegaROM with dynamic bank mapping.
+    /// Recompute megaROMBankPtr[] from current megaROMBanks[].
+    /// Called once at load time and on every bank switch (rare, ~50 times/game).
+    private func updateBankPtrs() {
+        guard let rom = megaROMData else { return }
+        let bankSize = 1 << megaROMBankShift          // 0x2000 or 0x4000
+        let maxBanks = max(1, rom.count / bankSize)
+        for i in 0..<4 {
+            megaROMBankPtr[i] = (megaROMBanks[i] % maxBanks) * bankSize
+        }
+    }
+
+    /// Read a byte from MegaROM via pre-computed bank pointers.
+    /// Hot path — called ~100K times/frame. No division, no modulo.
+    @inline(__always)
     private func readMegaROM(_ addr: UInt16) -> UInt8 {
         guard let rom = megaROMData else { return 0xFF }
-        let a = Int(addr)
-
-        switch megaROMMapper {
-        case .ascii8, .konami, .konamiSCC:
-            // 4 × 8KB banks: 0x4000-0x5FFF, 0x6000-0x7FFF, 0x8000-0x9FFF, 0xA000-0xBFFF
-            let bankIndex = (a - 0x4000) / 0x2000          // 0-3
-            let offsetInBank = (a - 0x4000) % 0x2000
-            // Wrap bank value by ROM size (real hardware mirrors ROM address lines)
-            let maxBanks = max(1, rom.count / 0x2000)
-            let romOffset = (megaROMBanks[bankIndex] % maxBanks) * 0x2000 + offsetInBank
-            return rom[romOffset]
-
-        case .ascii16:
-            // 2 × 16KB banks: 0x4000-0x7FFF, 0x8000-0xBFFF
-            let bankIndex = (a - 0x4000) / 0x4000          // 0-1
-            let offsetInBank = (a - 0x4000) % 0x4000
-            let maxBanks = max(1, rom.count / 0x4000)
-            let romOffset = (megaROMBanks[bankIndex] % maxBanks) * 0x4000 + offsetInBank
-            return rom[romOffset]
-
-        case .none:
-            return 0xFF
-        }
+        let rel = Int(addr) &- 0x4000
+        let bankIndex = rel >> megaROMBankShift        // 0-3 (8KB) or 0-1 (16KB)
+        let offset = rel & megaROMOffsetMask           // offset within bank
+        return rom[megaROMBankPtr[bankIndex] &+ offset]
     }
 
     // MARK: - Memory Write
@@ -417,8 +427,9 @@ final class MSXMemory {
             break
         }
 
-        // Log bank switches
+        // Update bank pointers and log switches
         if megaROMBanks != oldBanks {
+            updateBankPtrs()
             bankSwitchCount += 1
             if bankSwitchCount <= 50 {
                 print(String(format: "[BANK #%d] addr=%04X val=%d banks=[%d,%d,%d,%d] slot=%02X PC=%04X",

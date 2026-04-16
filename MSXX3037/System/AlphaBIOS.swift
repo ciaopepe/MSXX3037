@@ -236,17 +236,23 @@ enum AlphaBIOS {
         // MSX1 版 (SETRD/SETWRT 等) は R#14 を設定しないため、
         // 16KB 境界を超えるアクセスが正しく動作しなかった。
         //
-        // メモリマップ (0x3F70-0x3FB6 に Z80 スタブを配置):
-        //   0x3F70: NSTWRT - VRAM 書きアドレス設定 (22 bytes → 0x3F85)
-        //   0x3F86: NSETRD - VRAM 読みアドレス設定 (20 bytes → 0x3F99)
-        //   0x3F9A: NRDVRM - VRAM 1 バイト読み (6 bytes → 0x3F9F)
-        //   0x3FA0: NWRVRM - VRAM 1 バイト書き (8 bytes → 0x3FA7)
-        //   0x3FA8: BIGFIL - VRAM 塗りつぶし (15 bytes → 0x3FB6)
+        // 重要: 連続 OUT (0x99) の途中で VBlank 割り込みが入ると、ISR の
+        // IN A,(0x99) で VDP ラッチがリセットされ、後続の OUT が誤った
+        // レジスタに書き込まれる (例: R#14 用の 0x8E が R#0 に書かれる)。
+        // 全スタブは DI/EI で割り込みを禁止して保護する。
+        //
+        // メモリマップ (0x3F70-0x3FBA に Z80 スタブを配置):
+        //   0x3F70: NSTWRT - VRAM 書きアドレス設定 (24 bytes → 0x3F87)
+        //   0x3F88: NSETRD - VRAM 読みアドレス設定 (22 bytes → 0x3F9D)
+        //   0x3F9E: NRDVRM - VRAM 1 バイト読み (6 bytes → 0x3FA3)
+        //   0x3FA4: NWRVRM - VRAM 1 バイト書き (8 bytes → 0x3FAB)
+        //   0x3FAC: BIGFIL - VRAM 塗りつぶし (15 bytes → 0x3FBA)
 
         // ── NSTWRT (0x3F70): Set VRAM write address with R#14 ──
         // Input: HL = 16bit VRAM address
         // HL[15:14] → R#14[1:0], HL[13:0] → VDP address latch (write mode)
         let nstwrtStub: [UInt8] = [
+            0xF3,                   // DI             ; protect VDP latch
             0x7C,                   // LD A, H
             0x07,                   // RLCA
             0x07,                   // RLCA
@@ -260,14 +266,16 @@ enum AlphaBIOS {
             0xE6, 0x3F,             // AND 0x3F       ; mask to 6 bits
             0xF6, 0x40,             // OR 0x40        ; set write mode bit
             0xD3, 0x99,             // OUT (0x99), A  ; address high byte
+            0xFB,                   // EI
             0xC9,                   // RET
         ]
-        writeBytes(&rom, at: 0x3F70, bytes: nstwrtStub)
+        writeBytes(&rom, at: 0x3F70, bytes: nstwrtStub)  // 24 bytes → 0x3F87
         writeJP(&rom, at: 0x0171, to: 0x3F70)
 
-        // ── NSETRD (0x3F86): Set VRAM read address with R#14 ──
+        // ── NSETRD (0x3F88): Set VRAM read address with R#14 ──
         // Input: HL = 16bit VRAM address
         let nsetrdStub: [UInt8] = [
+            0xF3,                   // DI             ; protect VDP latch
             0x7C,                   // LD A, H
             0x07,                   // RLCA
             0x07,                   // RLCA
@@ -280,22 +288,23 @@ enum AlphaBIOS {
             0x7C,                   // LD A, H
             0xE6, 0x3F,             // AND 0x3F       ; read mode (bit 6 = 0)
             0xD3, 0x99,             // OUT (0x99), A  ; address high byte
+            0xFB,                   // EI
             0xC9,                   // RET
         ]
-        writeBytes(&rom, at: 0x3F86, bytes: nsetrdStub)
-        writeJP(&rom, at: 0x016E, to: 0x3F86)
+        writeBytes(&rom, at: 0x3F88, bytes: nsetrdStub)  // 22 bytes → 0x3F9D
+        writeJP(&rom, at: 0x016E, to: 0x3F88)
 
-        // ── NRDVRM (0x3F9A): Read 1 byte from VRAM ──
+        // ── NRDVRM (0x3F9E): Read 1 byte from VRAM ──
         // Input: HL = VRAM address → Output: A = data
         let nrdvrmStub: [UInt8] = [
-            0xCD, 0x86, 0x3F,       // CALL 0x3F86   ; NSETRD (pre-reads into buffer)
+            0xCD, 0x88, 0x3F,       // CALL 0x3F88   ; NSETRD
             0xDB, 0x98,             // IN A, (0x98)  ; read pre-buffered byte
             0xC9,                   // RET
         ]
-        writeBytes(&rom, at: 0x3F9A, bytes: nrdvrmStub)
-        writeJP(&rom, at: 0x0174, to: 0x3F9A)
+        writeBytes(&rom, at: 0x3F9E, bytes: nrdvrmStub)  // 6 bytes → 0x3FA3
+        writeJP(&rom, at: 0x0174, to: 0x3F9E)
 
-        // ── NWRVRM (0x3FA0): Write 1 byte to VRAM ──
+        // ── NWRVRM (0x3FA4): Write 1 byte to VRAM ──
         // Input: HL = VRAM address, A = data
         let nwrvrmStub: [UInt8] = [
             0xF5,                   // PUSH AF        ; save data byte
@@ -304,30 +313,27 @@ enum AlphaBIOS {
             0xD3, 0x98,             // OUT (0x98), A  ; write to VRAM
             0xC9,                   // RET
         ]
-        writeBytes(&rom, at: 0x3FA0, bytes: nwrvrmStub)
-        writeJP(&rom, at: 0x0177, to: 0x3FA0)
+        writeBytes(&rom, at: 0x3FA4, bytes: nwrvrmStub)  // 8 bytes → 0x3FAB
+        writeJP(&rom, at: 0x0177, to: 0x3FA4)
 
-        // ── BIGFIL (0x3FA8): Fill VRAM area ──
+        // ── BIGFIL (0x3FAC): Fill VRAM area ──
         // Input: HL = start address, BC = length, A = fill value
-        // NSTWRT で R#14 + address latch を設定後、連続 OUT で塗りつぶす。
-        // VDP は OUT 毎にアドレスを自動インクリメントし、
-        // 16KB 境界では R#14 も自動インクリメントされる。
         let bigfilStub: [UInt8] = [
             0xF5,                   // PUSH AF        ; save fill value
             0xCD, 0x70, 0x3F,       // CALL 0x3F70   ; NSTWRT
             0xF1,                   // POP AF         ; restore fill value
-            // loop (0x3FAD):
+            // loop (0x3FB1):
             0xD3, 0x98,             // OUT (0x98), A  ; write byte (auto-increment)
             0x0B,                   // DEC BC
             0x57,                   // LD D, A        ; save fill value
             0x78,                   // LD A, B
             0xB1,                   // OR C           ; BC == 0?
             0x7A,                   // LD A, D        ; restore fill value
-            0x20, 0xF7,             // JR NZ, -9      ; → 0x3FAD
+            0x20, 0xF7,             // JR NZ, -9      ; → 0x3FB1
             0xC9,                   // RET
         ]
-        writeBytes(&rom, at: 0x3FA8, bytes: bigfilStub)
-        writeJP(&rom, at: 0x016B, to: 0x3FA8)
+        writeBytes(&rom, at: 0x3FAC, bytes: bigfilStub)  // 15 bytes → 0x3FBA
+        writeJP(&rom, at: 0x016B, to: 0x3FAC)
 
         // --- 0x017A RDRES: RESET ポート読み込み (MSX2+) ---
         // A=0 を返す
@@ -527,43 +533,43 @@ enum AlphaBIOS {
         //
         // 配置先: 0x3F70-0x3FAE (CHGMOD パッチ 0x3F30-0x3F68 の後の空き領域)
 
-        // NSTWRT (0x3F70): HL → R#14 + address latch (write mode)
+        // NSTWRT (0x3F70): DI + HL → R#14 + address latch (write mode) + EI
         let nstwrtFix: [UInt8] = [
-            0x7C, 0x07, 0x07, 0xE6, 0x07, 0xD3, 0x99,
-            0x3E, 0x8E, 0xD3, 0x99,
-            0x7D, 0xD3, 0x99,
-            0x7C, 0xE6, 0x3F, 0xF6, 0x40, 0xD3, 0x99,
-            0xC9,
+            0xF3,                                       // DI
+            0x7C, 0x07, 0x07, 0xE6, 0x07, 0xD3, 0x99,  // R#14 data
+            0x3E, 0x8E, 0xD3, 0x99,                     // write R#14
+            0x7D, 0xD3, 0x99,                            // addr low
+            0x7C, 0xE6, 0x3F, 0xF6, 0x40, 0xD3, 0x99,  // addr high (write)
+            0xFB, 0xC9,                                  // EI + RET
         ]
-        writeBytes(&rom, at: 0x3F70, bytes: nstwrtFix)
-        // NSETRD (0x3F86): HL → R#14 + address latch (read mode)
+        writeBytes(&rom, at: 0x3F70, bytes: nstwrtFix)  // 24 bytes → 0x3F87
+        // NSETRD (0x3F88): DI + HL → R#14 + address latch (read mode) + EI
         let nsetrdFix: [UInt8] = [
-            0x7C, 0x07, 0x07, 0xE6, 0x07, 0xD3, 0x99,
-            0x3E, 0x8E, 0xD3, 0x99,
-            0x7D, 0xD3, 0x99,
-            0x7C, 0xE6, 0x3F, 0xD3, 0x99,
-            0xC9,
+            0xF3,                                       // DI
+            0x7C, 0x07, 0x07, 0xE6, 0x07, 0xD3, 0x99,  // R#14 data
+            0x3E, 0x8E, 0xD3, 0x99,                     // write R#14
+            0x7D, 0xD3, 0x99,                            // addr low
+            0x7C, 0xE6, 0x3F, 0xD3, 0x99,               // addr high (read)
+            0xFB, 0xC9,                                  // EI + RET
         ]
-        writeBytes(&rom, at: 0x3F86, bytes: nsetrdFix)
-        // NRDVRM (0x3F9A): CALL NSETRD + IN A,(0x98)
-        writeBytes(&rom, at: 0x3F9A, bytes: [0xCD, 0x86, 0x3F, 0xDB, 0x98, 0xC9])
-        // NWRVRM (0x3FA0): PUSH AF + CALL NSTWRT + POP AF + OUT (0x98),A
-        writeBytes(&rom, at: 0x3FA0, bytes: [0xF5, 0xCD, 0x70, 0x3F, 0xF1, 0xD3, 0x98, 0xC9])
-        // BIGFIL (0x3FA8): PUSH AF + CALL NSTWRT + POP AF + loop OUT
-        writeBytes(&rom, at: 0x3FA8, bytes: [
+        writeBytes(&rom, at: 0x3F88, bytes: nsetrdFix)  // 22 bytes → 0x3F9D
+        // NRDVRM (0x3F9E): CALL NSETRD + IN A,(0x98)
+        writeBytes(&rom, at: 0x3F9E, bytes: [0xCD, 0x88, 0x3F, 0xDB, 0x98, 0xC9])
+        // NWRVRM (0x3FA4): PUSH AF + CALL NSTWRT + POP AF + OUT (0x98),A
+        writeBytes(&rom, at: 0x3FA4, bytes: [0xF5, 0xCD, 0x70, 0x3F, 0xF1, 0xD3, 0x98, 0xC9])
+        // BIGFIL (0x3FAC): PUSH AF + CALL NSTWRT + POP AF + loop OUT
+        writeBytes(&rom, at: 0x3FAC, bytes: [
             0xF5, 0xCD, 0x70, 0x3F, 0xF1,
             0xD3, 0x98, 0x0B, 0x57, 0x78, 0xB1, 0x7A, 0x20, 0xF7, 0xC9,
         ])
 
         // エントリポイントの JP 書き換え
-        // C-BIOS MSX1 では 0x016B-0x0177 は内部コードの一部だが、
-        // MSX2 として動作させるため MSX2 BIOS エントリポイントとして上書きする。
-        writeJP(&rom, at: 0x016B, to: 0x3FA8)  // BIGFIL
-        writeJP(&rom, at: 0x016E, to: 0x3F86)  // NSETRD
+        writeJP(&rom, at: 0x016B, to: 0x3FAC)  // BIGFIL
+        writeJP(&rom, at: 0x016E, to: 0x3F88)  // NSETRD
         writeJP(&rom, at: 0x0171, to: 0x3F70)  // NSTWRT
-        writeJP(&rom, at: 0x0174, to: 0x3F9A)  // NRDVRM
-        writeJP(&rom, at: 0x0177, to: 0x3FA0)  // NWRVRM
-        print("[Patch 12] 17bit VRAM stubs applied at 0x3F70-0x3FB7")
+        writeJP(&rom, at: 0x0174, to: 0x3F9E)  // NRDVRM
+        writeJP(&rom, at: 0x0177, to: 0x3FA4)  // NWRVRM
+        print("[Patch 12] 17bit VRAM stubs applied at 0x3F70-0x3FBA (DI/EI protected)")
 
         // ── Patch 13: SETWRT/SETRD に R#14=0 リセットラッパー追加 ──
         // MSX2 ゲームが NSTWRT 等で R#14 を変更した後、C-BIOS の MSX1 版
@@ -574,20 +580,22 @@ enum AlphaBIOS {
         // 修正: 0x0050 / 0x0053 の JP ターゲットをラッパーにリダイレクトし、
         // R#14=0 を書き込んでから元の実装にジャンプする。
         //
-        // 配置先: 0x3FC0 (SETRD wrapper, 11 bytes), 0x3FCB (SETWRT wrapper, 11 bytes)
+        // 配置先: 0x3FC0 (SETRD wrapper, 12 bytes), 0x3FCC (SETWRT wrapper, 12 bytes)
         //
-        // ラッパーコード (各11バイト):
+        // ラッパーコード (各12バイト):
+        //   DI              ; F3       ; protect VDP latch
         //   LD A, 0x00      ; 3E 00
         //   OUT (0x99), A   ; D3 99   ; R#14 data = 0
         //   LD A, 0x8E      ; 3E 8E   ; 0x80 | 14
         //   OUT (0x99), A   ; D3 99   ; write R#14
-        //   JP original     ; C3 xx xx
+        //   JP original     ; C3 xx xx ; original SETWRT/SETRD will EI
 
         // SETRD (0x0050) ラッパー
         if rom[0x0050] == 0xC3 {
             let origLo = rom[0x0051]
             let origHi = rom[0x0052]
             let setrdWrapper: [UInt8] = [
+                0xF3,               // DI
                 0x3E, 0x00,         // LD A, 0x00
                 0xD3, 0x99,         // OUT (0x99), A
                 0x3E, 0x8E,         // LD A, 0x8E
@@ -604,15 +612,16 @@ enum AlphaBIOS {
             let origLo = rom[0x0054]
             let origHi = rom[0x0055]
             let setwrtWrapper: [UInt8] = [
+                0xF3,               // DI
                 0x3E, 0x00,         // LD A, 0x00
                 0xD3, 0x99,         // OUT (0x99), A
                 0x3E, 0x8E,         // LD A, 0x8E
                 0xD3, 0x99,         // OUT (0x99), A
                 0xC3, origLo, origHi, // JP original SETWRT
             ]
-            writeBytes(&rom, at: 0x3FCB, bytes: setwrtWrapper)
-            writeJP(&rom, at: 0x0053, to: 0x3FCB)
-            print("[Patch 13] SETWRT R#14 reset wrapper at 0x3FCB → orig 0x\(String(format: "%04X", Int(origHi) << 8 | Int(origLo)))")
+            writeBytes(&rom, at: 0x3FCC, bytes: setwrtWrapper)
+            writeJP(&rom, at: 0x0053, to: 0x3FCC)
+            print("[Patch 13] SETWRT R#14 reset wrapper at 0x3FCC → orig 0x\(String(format: "%04X", Int(origHi) << 8 | Int(origLo)))")
         }
     }
 

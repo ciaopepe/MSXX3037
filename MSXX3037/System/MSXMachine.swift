@@ -83,7 +83,6 @@ final class MSXMachine {
 
     // MARK: - Screen buffer (RGBA pixels)
     private(set) var screenPixels = [UInt32](repeating: 0, count: VDP.screenWidth * VDP.screenHeight)
-    var onFrameReady: (([UInt32]) -> Void)?
 
     // MARK: - BIOS persistence
     private static var biosDirectory: URL {
@@ -1437,7 +1436,6 @@ final class MSXMachine {
                     // VBlank start
                     vdp.triggerVBlank()
                     vdp.renderFrame(into: &screenPixels)
-                    onFrameReady?(screenPixels)
                 }
             }
         }
