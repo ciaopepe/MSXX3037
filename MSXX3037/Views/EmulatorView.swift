@@ -1080,7 +1080,10 @@ final class EmulatorViewModel: ObservableObject {
 
     /// リセット（スプラッシュを再表示し、frame 165 コールバックでゲーム画面を解除）
     func resetGame() {
+        machine.stop()       // PSG オーディオをクリーンに停止
         machine.reset()
+        isRunning = true
+        machine.start()      // PSG オーディオを再初期化して自動実行
         if loadedCartridge { showSplash = true }
     }
 
