@@ -139,8 +139,15 @@ final class VDP {
 
     private func resetPalette() {
         paletteRAM = VDP.defaultPaletteRAM
+        // Compute RGBA using the same r*255/7 formula as writePalette() / restoreSnapshot()
+        // so startup colors are identical to post-save/load colors.
         for i in 0..<16 {
-            palette[i] = VDP.defaultPalette[i]
+            let byte0 = VDP.defaultPaletteRAM[i * 2]
+            let byte1 = VDP.defaultPaletteRAM[i * 2 + 1]
+            let r8 = UInt32((byte0 >> 4) & 0x07) * 255 / 7
+            let b8 = UInt32(byte0 & 0x07) * 255 / 7
+            let g8 = UInt32(byte1 & 0x07) * 255 / 7
+            palette[i] = (r8 << 24) | (g8 << 16) | (b8 << 8) | 0xFF
         }
     }
 
