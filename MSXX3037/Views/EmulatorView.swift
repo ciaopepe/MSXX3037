@@ -11,6 +11,7 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private var pipeline: MTLRenderPipelineState?
+    private var crtPipeline: MTLRenderPipelineState?
     private var texture: MTLTexture?
     private var vertexBuffer: MTLBuffer?
     private let machine: MSXMachine
@@ -18,6 +19,8 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
     private var rgbaBuffer = [UInt8](repeating: 0, count: VDP.screenWidth * VDP.screenHeight * 4)
     /// 速度倍率（1.0 = 1draw につき1 machine frame）
     var speedMultiplier: Double = 1.0
+    /// CRT フィルタ有効フラグ
+    var crtEnabled: Bool = false
     /// 端数フレームの蓄積用
     private var frameAccumulator: Double = 0.0
 
@@ -44,7 +47,8 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
         #include <metal_stdlib>
         using namespace metal;
         struct VertexOut { float4 pos [[position]]; float2 uv; };
-        // constant float* で直接読む → struct padding の問題を完全回避
+
+        // 共通頂点シェーダー
         vertex VertexOut vert(uint id [[vertex_id]], constant float* v [[buffer(0)]]) {
             uint b = id * 6;
             VertexOut o;
@@ -52,23 +56,75 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
             o.uv  = float2(v[b+4], v[b+5]);
             return o;
         }
+
+        // 通常描画（ニアレストネイバー）
         fragment float4 frag(VertexOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
             constexpr sampler s(min_filter::nearest, mag_filter::nearest);
             return tex.sample(s, in.uv);
         }
+
+        // CRT フィルタ描画
+        fragment float4 frag_crt(VertexOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+            float2 uv = in.uv;
+
+            // 1. バレル歪み（ブラウン管の球面ガラス）
+            float2 c = uv * 2.0 - 1.0;
+            uv += c * dot(c, c) * 0.06;
+            if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+                return float4(0.0, 0.0, 0.0, 1.0);
+
+            // 2. 色収差（RGB の横ズレ）
+            constexpr sampler s(min_filter::linear, mag_filter::linear, address::clamp_to_edge);
+            float ab = 0.002;
+            float r = tex.sample(s, uv + float2(-ab, 0.0)).r;
+            float g = tex.sample(s, uv).g;
+            float b = tex.sample(s, uv + float2( ab, 0.0)).b;
+            float4 color = float4(r, g, b, 1.0);
+
+            // 3. スキャンライン（MSX ピクセル行の境界を暗くする）
+            float scanline = abs(sin(uv.y * 212.0 * 3.14159265));
+            color.rgb *= 0.65 + 0.35 * scanline;
+
+            // 4. RGB フォスファマスク（スクリーン px 単位の 3 色サブピクセル）
+            int col3 = int(in.pos.x) % 3;
+            float3 mask;
+            if      (col3 == 0) { mask = float3(1.00, 0.75, 0.75); }
+            else if (col3 == 1) { mask = float3(0.75, 1.00, 0.75); }
+            else                { mask = float3(0.75, 0.75, 1.00); }
+            color.rgb *= mask * 1.20;   // avg 0.833 × 1.20 ≈ 1.0 で輝度補償
+
+            // 5. ビネット（コーナー周辺減光）
+            float2 vp = (uv - 0.5) * 2.0;
+            float vig = 1.0 - smoothstep(0.45, 1.35, length(vp * float2(1.0, 1.15)));
+            color.rgb *= max(vig, 0.0);
+
+            // 6. ガンマ補正（CRT 自発光の輝き感）
+            color.rgb = pow(clamp(color.rgb, 0.001, 1.0), float3(0.85));
+
+            return color;
+        }
         """
         do {
             let lib = try device.makeLibrary(source: shaderSrc, options: nil)
-            guard let vert = lib.makeFunction(name: "vert"),
-                  let frag = lib.makeFunction(name: "frag") else {
+            guard let vert     = lib.makeFunction(name: "vert"),
+                  let frag     = lib.makeFunction(name: "frag"),
+                  let fragCRT  = lib.makeFunction(name: "frag_crt") else {
                 print("[Metal] ERROR: shader functions not found")
                 return
             }
+            let fmt = mtkView.colorPixelFormat
+
             let desc = MTLRenderPipelineDescriptor()
-            desc.vertexFunction = vert
+            desc.vertexFunction   = vert
             desc.fragmentFunction = frag
-            desc.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
+            desc.colorAttachments[0].pixelFormat = fmt
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
+
+            let descCRT = MTLRenderPipelineDescriptor()
+            descCRT.vertexFunction   = vert
+            descCRT.fragmentFunction = fragCRT
+            descCRT.colorAttachments[0].pixelFormat = fmt
+            crtPipeline = try device.makeRenderPipelineState(descriptor: descCRT)
         } catch {
             print("[Metal] ERROR: pipeline setup failed: \(error)")
         }
@@ -140,7 +196,8 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
         }
 
         updateTexture(pixels: machine.screenPixels)
-        if let pip = pipeline, let vb = vertexBuffer {
+        let activePipeline = crtEnabled ? crtPipeline : pipeline
+        if let pip = activePipeline, let vb = vertexBuffer {
             enc.setRenderPipelineState(pip)
             enc.setVertexBuffer(vb, offset: 0, index: 0)
             enc.setFragmentTexture(texture, index: 0)
@@ -415,6 +472,7 @@ struct FireButton: View {
 // MARK: - 設定シート
 struct SettingsView: View {
     @Binding var speedValue: Double
+    @Binding var crtEnabled: Bool
     @ObservedObject var config: GamepadConfig
     @Binding var biosName: String
     let onSelectAlphaBIOS: () -> Void
@@ -547,6 +605,21 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                }
+
+                // ディスプレイ設定
+                Section {
+                    Toggle(isOn: $crtEnabled) {
+                        Label("CRT Filter", systemImage: "tv.fill")
+                    }
+                    .tint(.cyan)
+                    if crtEnabled {
+                        Text("Scanlines · Barrel distortion · Phosphor mask · Vignette")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("Display")
                 }
 
                 // EMuSX ロゴ
@@ -687,6 +760,7 @@ struct EmulatorView: View {
         .sheet(isPresented: $viewModel.showSettings) {
             SettingsView(
                 speedValue: $viewModel.speedValue,
+                crtEnabled: $viewModel.crtEnabled,
                 config: viewModel.gamepadConfig,
                 biosName: $viewModel.biosName,
                 onSelectAlphaBIOS: { viewModel.switchToAlphaBIOS() },
@@ -1108,7 +1182,13 @@ final class EmulatorViewModel: ObservableObject {
     let gamepadConfig = GamepadConfig.shared
 
     @Published var renderer: MSXRenderer? = nil {
-        didSet { applySpeed() }
+        didSet { applySpeed(); renderer?.crtEnabled = crtEnabled }
+    }
+    @Published var crtEnabled: Bool = UserDefaults.standard.bool(forKey: "crtFilter") {
+        didSet {
+            UserDefaults.standard.set(crtEnabled, forKey: "crtFilter")
+            renderer?.crtEnabled = crtEnabled
+        }
     }
     @Published var showingFilePicker = false
     @Published var biosName: String = MSXMachine.savedBIOSName ?? "α-BIOS"
