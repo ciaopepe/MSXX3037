@@ -69,7 +69,7 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
 
             // 1. バレル歪み（ブラウン管の球面ガラス）
             float2 c = uv * 2.0 - 1.0;
-            uv += c * dot(c, c) * 0.06;
+            uv += c * dot(c, c) * 0.03;
             if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
                 return float4(0.0, 0.0, 0.0, 1.0);
 
@@ -95,7 +95,7 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
 
             // 5. ビネット（コーナー周辺減光）
             float2 vp = (uv - 0.5) * 2.0;
-            float vig = 1.0 - smoothstep(0.45, 1.35, length(vp * float2(1.0, 1.15)));
+            float vig = 1.0 - smoothstep(0.65, 1.55, length(vp * float2(1.0, 1.05)));
             color.rgb *= max(vig, 0.0);
 
             // 6. ガンマ補正（CRT 自発光の輝き感）
