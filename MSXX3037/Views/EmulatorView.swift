@@ -497,12 +497,12 @@ struct SettingsView: View {
                                     .foregroundColor(.secondary)
                             }
                         } else if !keyboardMgr.isConnected {
-                            Label("Gamepad E: キーボード接続時に表示", systemImage: "keyboard")
+                            Label("Gamepad E: available when a keyboard is connected", systemImage: "keyboard")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
 
-                        // Gamepad E 選択中: キーボードマッピング説明
+                        // Gamepad E: keyboard mapping info
                         if config.keySet == .setE {
                             VStack(alignment: .leading, spacing: 4) {
                                 keyboardMappingRow("⌥ Option",    msxKey: "GRAPH")
@@ -623,7 +623,7 @@ struct SettingsView: View {
         }
     }
 
-    /// Gamepad E キーボードマッピング説明行
+    /// Gamepad E — keyboard mapping row
     private func keyboardMappingRow(_ hwKey: String, msxKey: String) -> some View {
         HStack(spacing: 0) {
             Text(hwKey)
