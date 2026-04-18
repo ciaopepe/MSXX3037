@@ -69,7 +69,7 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
 
             // 1. バレル歪み（ブラウン管の球面ガラス）
             float2 c = uv * 2.0 - 1.0;
-            uv += c * dot(c, c) * 0.03;
+            uv += c * dot(c, c) * 0.015;
             if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
                 return float4(0.0, 0.0, 0.0, 1.0);
 
