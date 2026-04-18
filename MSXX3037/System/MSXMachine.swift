@@ -852,23 +852,35 @@ final class MSXMachine {
     }
 
     /// 現在の screenPixels を UIImage に変換して返す
+    ///
+    /// screenPixels の各 UInt32 は Swift 値として 0xRRGGBBAA だが、
+    /// リトルエンディアン iOS のメモリ上では [AA, BB, GG, RR] の順に並ぶ。
+    /// CGContext に直接渡すとチャンネルが入れ替わるため、
+    /// R/G/B を明示的に取り出して [R, G, B, 0xFF] バイト列を構築してから渡す。
     func makeScreenshot() -> UIImage? {
         let width  = VDP.screenWidth
         let height = VDP.screenHeight
-        var pixels = screenPixels  // UInt32: RRGGBBAA (big-endian byte layout)
-        return pixels.withUnsafeMutableBytes { ptr -> UIImage? in
+        let count  = width * height
+
+        // 0xRRGGBBAA → [R, G, B, 0xFF] の連続バイト列に変換
+        var bytes = [UInt8](repeating: 0xFF, count: count * 4)
+        for i in 0..<count {
+            let p = screenPixels[i]
+            bytes[i * 4]     = UInt8((p >> 24) & 0xFF)  // R
+            bytes[i * 4 + 1] = UInt8((p >> 16) & 0xFF)  // G
+            bytes[i * 4 + 2] = UInt8((p >> 8)  & 0xFF)  // B
+            // bytes[i * 4 + 3] = 0xFF (alpha, skipped)
+        }
+
+        return bytes.withUnsafeMutableBytes { ptr -> UIImage? in
             guard let base = ptr.baseAddress else { return nil }
-            let bitmapInfo = CGBitmapInfo(rawValue:
-                CGBitmapInfo.byteOrder32Big.rawValue |
-                CGImageAlphaInfo.noneSkipLast.rawValue
-            )
             guard let ctx = CGContext(
                 data: base,
                 width: width, height: height,
                 bitsPerComponent: 8,
                 bytesPerRow: width * 4,
                 space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: bitmapInfo.rawValue
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
             ), let cgImg = ctx.makeImage() else { return nil }
             return UIImage(cgImage: cgImg)
         }
