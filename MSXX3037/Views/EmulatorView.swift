@@ -410,6 +410,7 @@ struct SettingsView: View {
     @State private var showingBIOSPicker = false
     @State private var gamepadExpanded = false
     @ObservedObject private var store: StoreKitManager = .shared
+    @ObservedObject private var keyboardMgr = ExternalKeyboardManager.shared
 
     var body: some View {
         NavigationStack {
@@ -471,11 +472,19 @@ struct SettingsView: View {
                 // ゲームパッド設定（折りたたみ可能）
                 Section {
                     DisclosureGroup(isExpanded: $gamepadExpanded) {
-                        // キーセット選択（Premium 未購入は setA のみ）
+                        // キーセット選択（Premium 未購入は setA のみ / setE はキーボード接続時のみ）
                         Picker("Pad Type", selection: $config.keySet) {
                             ForEach(GamepadKeySet.allCases, id: \.self) { set in
-                                if set == .setA || store.isPremium {
+                                if set == .setA {
                                     Text(set.label).tag(set)
+                                } else if set == .setE {
+                                    if store.isPremium && keyboardMgr.isConnected {
+                                        Text(set.label).tag(set)
+                                    }
+                                } else {
+                                    if store.isPremium {
+                                        Text(set.label).tag(set)
+                                    }
                                 }
                             }
                         }
@@ -483,10 +492,26 @@ struct SettingsView: View {
                             NavigationLink {
                                 PremiumUnlockView()
                             } label: {
-                                Label("Gamepad B / C / D は Premium で解放", systemImage: "lock.fill")
+                                Label("Gamepad B / C / D / E は Premium で解放", systemImage: "lock.fill")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
+                        } else if !keyboardMgr.isConnected {
+                            Label("Gamepad E: キーボード接続時に表示", systemImage: "keyboard")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        // Gamepad E 選択中: キーボードマッピング説明
+                        if config.keySet == .setE {
+                            VStack(alignment: .leading, spacing: 4) {
+                                keyboardMappingRow("⌥ Option",    msxKey: "GRAPH")
+                                keyboardMappingRow("⌘ / ⌃",       msxKey: "CODE")
+                                keyboardMappingRow("⎋ Esc",        msxKey: "STOP")
+                                keyboardMappingRow("⇥ Tab",        msxKey: "SELECT")
+                                keyboardMappingRow("F1 – F5",      msxKey: "F1 – F5")
+                            }
+                            .padding(.vertical, 4)
                         }
 
                         // ボタン割り当て・連射
@@ -597,11 +622,29 @@ struct SettingsView: View {
                 .font(.caption)
         }
     }
+
+    /// Gamepad E キーボードマッピング説明行
+    private func keyboardMappingRow(_ hwKey: String, msxKey: String) -> some View {
+        HStack(spacing: 0) {
+            Text(hwKey)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundColor(.cyan)
+                .frame(width: 80, alignment: .leading)
+            Text("→")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 4)
+            Text(msxKey)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundColor(.white)
+        }
+    }
 }
 
 // MARK: - Emulator View
 struct EmulatorView: View {
     @StateObject private var viewModel = EmulatorViewModel()
+    @ObservedObject private var keyboardMgr = ExternalKeyboardManager.shared
 
     var body: some View {
         GeometryReader { geo in
@@ -649,6 +692,19 @@ struct EmulatorView: View {
                     }
             }
             .presentationDetents([.large])
+        }
+        // Gamepad E: 外部キーボードキャプチャ管理
+        .onAppear {
+            if viewModel.gamepadConfig.keySet == .setE {
+                keyboardMgr.startCapture(machine: viewModel.machine)
+            }
+        }
+        .onChange(of: viewModel.gamepadConfig.keySet) { _, newSet in
+            if newSet == .setE {
+                keyboardMgr.startCapture(machine: viewModel.machine)
+            } else {
+                keyboardMgr.stopCapture()
+            }
         }
     }
 

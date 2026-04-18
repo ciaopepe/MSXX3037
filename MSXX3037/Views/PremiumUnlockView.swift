@@ -13,6 +13,8 @@ struct PremiumUnlockView: View {
     private let features: [(icon: String, color: Color, title: String, description: String)] = [
         ("gamecontroller.fill",  .cyan,   "Gamepad B / C / D",
          "Unlock extended gamepads with 8-directional input and up to 6 buttons."),
+        ("keyboard.fill",        .teal,  "Gamepad E (Keyboard)",
+         "When a hardware keyboard is connected, map ⌥ Option, ⌘ Command, Esc, Tab, and F1–F5 directly to MSX special keys."),
         ("square.and.arrow.down.fill", .green, "Save States",
          "Save your game progress at any time across 3 save slots."),
         ("square.and.arrow.up.fill",   .orange, "Load States",

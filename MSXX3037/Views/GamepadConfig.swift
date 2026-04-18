@@ -10,6 +10,7 @@ enum GamepadKeySet: Int, CaseIterable {
     case setB = 1  // 8方向 + 2ボタン
     case setC = 2  // 8方向 + 4ボタン
     case setD = 3  // 8方向 + 6ボタン
+    case setE = 4  // 8方向 + 2ボタン + 外部キーボード特殊キー
 
     var label: String {
         switch self {
@@ -17,17 +18,21 @@ enum GamepadKeySet: Int, CaseIterable {
         case .setB: return "B: 8-Dir + 2 Btn"
         case .setC: return "C: 8-Dir + 4 Btn"
         case .setD: return "D: 8-Dir + 6 Btn"
+        case .setE: return "E: Keyboard"
         }
     }
 
     var is8Direction: Bool { self != .setA }
     var buttonCount: Int {
         switch self {
-        case .setA, .setB: return 2
+        case .setA, .setB, .setE: return 2
         case .setC: return 4
         case .setD: return 6
         }
     }
+
+    /// 外部キーボードで特殊キー（GRAPH / CODE / STOP / SEL / F1-F5）を入力するモード
+    var isKeyboardMode: Bool { self == .setE }
 }
 
 // MARK: - セーブステートに含める設定スナップショット
