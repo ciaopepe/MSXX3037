@@ -2,6 +2,7 @@
 // Integrates Z80 CPU, VDP, PSG, and Memory
 
 import Foundation
+import UIKit
 
 final class MSXMachine {
     // MARK: - Components
@@ -843,6 +844,49 @@ final class MSXMachine {
         saveDirectory.appendingPathComponent("save_slot\(slot).bin")
     }
 
+    // MARK: - Screenshot / Thumbnail
+
+    /// サムネイル JPEG の保存先 URL
+    func thumbnailURL(slot: Int) -> URL {
+        saveDirectory.appendingPathComponent("save_slot\(slot)_thumb.jpg")
+    }
+
+    /// 現在の screenPixels を UIImage に変換して返す
+    func makeScreenshot() -> UIImage? {
+        let width  = VDP.screenWidth
+        let height = VDP.screenHeight
+        var pixels = screenPixels  // UInt32: RRGGBBAA (big-endian byte layout)
+        return pixels.withUnsafeMutableBytes { ptr -> UIImage? in
+            guard let base = ptr.baseAddress else { return nil }
+            let bitmapInfo = CGBitmapInfo(rawValue:
+                CGBitmapInfo.byteOrder32Big.rawValue |
+                CGImageAlphaInfo.noneSkipLast.rawValue
+            )
+            guard let ctx = CGContext(
+                data: base,
+                width: width, height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: bitmapInfo.rawValue
+            ), let cgImg = ctx.makeImage() else { return nil }
+            return UIImage(cgImage: cgImg)
+        }
+    }
+
+    /// セーブ時に現在画面をサムネイルとして保存
+    private func saveThumbnail(slot: Int) {
+        guard let img = makeScreenshot(),
+              let data = img.jpegData(compressionQuality: 0.75) else { return }
+        try? data.write(to: thumbnailURL(slot: slot))
+    }
+
+    /// セーブスロットのサムネイルを読み込む（データがなければ nil）
+    func loadThumbnail(slot: Int) -> UIImage? {
+        guard let data = try? Data(contentsOf: thumbnailURL(slot: slot)) else { return nil }
+        return UIImage(data: data)
+    }
+
     /// 状態をセーブスロットに保存。成功なら true
     /// settings を渡すとセーブデータに設定スナップショットも含める
     @discardableResult
@@ -856,6 +900,7 @@ final class MSXMachine {
             snapshot.settings = settings
             let data = try JSONEncoder().encode(snapshot)
             try data.write(to: saveURL(slot: slot))
+            saveThumbnail(slot: slot)   // 現在画面をサムネイルとして保存
             print("[Save] \(cartridgeName) slot \(slot): \(data.count) bytes saved")
             return true
         } catch {

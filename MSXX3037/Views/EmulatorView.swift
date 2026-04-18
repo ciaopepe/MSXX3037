@@ -2,6 +2,7 @@
 
 import SwiftUI
 import MetalKit
+import AVKit
 import UniformTypeIdentifiers
 import Combine
 
@@ -169,6 +170,18 @@ struct MetalView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {}
+}
+
+// MARK: - AirPlay Button
+struct AirPlayButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let v = AVRoutePickerView()
+        v.tintColor       = .white
+        v.activeTintColor = UIColor(red: 0, green: 1, blue: 1, alpha: 1)  // .cyan
+        v.backgroundColor = .clear
+        return v
+    }
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }
 
 // MARK: - Gamepad Overlay（横画面用）
@@ -587,6 +600,10 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AirPlayButton()
+                        .frame(width: 36, height: 36)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
@@ -971,6 +988,30 @@ struct EmulatorView: View {
                     .background(isPremium ? Color.green.opacity(0.6) : Color.gray.opacity(0.4))
                     .cornerRadius(8)
             }
+
+            // セーブ時のサムネイル
+            let thumbnail = viewModel.machine.loadThumbnail(slot: slot)
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.white.opacity(0.05))
+                    .frame(width: 80, height: 60)
+                if let thumb = thumbnail {
+                    Image(uiImage: thumb)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 80, height: 60)
+                        .clipped()
+                        .cornerRadius(4)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 20))
+                        .foregroundColor(.white.opacity(0.2))
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+            )
 
             // ロードボタン
             Button {
