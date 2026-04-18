@@ -43,35 +43,6 @@ final class MSXMachine {
 
     // MARK: - Debug
     var frameCount = 0
-    private var debugVDP = false       // VDP register write logs (noisy, disabled)
-    private var debugCartScan = false  // C-BIOS cartridge slot scan (noisy, disabled)
-    private var lastScreenEnabled = false  // Track screen enable transitions
-    #if DEBUG
-    var pcHistogram = [UInt16: Int]()
-    var ppiReadCount = 0       // PPI port B (0xA9) read counter
-    var psgR14ReadCount = 0    // PSG R#14 read counter
-    var debugInputLog = false  // Log individual I/O reads for input debugging
-    #endif
-
-    // Boot-phase PC trace for diagnosing game initialization loops
-    private var pcTraceBuffer = [UInt16]()  // circular buffer of recent PCs
-    private var pcTraceEnabled = false
-    private var pcTraceMaxSize = 200
-    // VDP status read counter (port 0x99 reads)
-    private var vdpStatusReadCount = 0
-    // Slot register change counter (after boot phase)
-    private var slotChangeLog = [(frame: Int, value: UInt8, pc: UInt16)]()
-    private var slotChangeLogEnabled = true
-    // MegaROM diagnostic: log first N bank switch writes for debugging
-    private var megaROMWriteLogCount = 0
-    // MegaROM INIT detection: log when PC first reaches cartridge INIT address
-    private var initAddressHitLogged = false
-    // PC filter diagnostic: count blocked mapper writes (PC < 0x4000)
-    private var blockedMapperWrites = 0
-    private var blockedMapperWriteLogLimit = 10
-    // SP tracking: detect when stack pointer enters cartridge ROM area
-    private var spInCartAreaLogged = false
-    private var lastSPLogValue: UInt16 = 0
 
     // MARK: - Game start detection
     var cartridgeLoaded = false
@@ -112,21 +83,6 @@ final class MSXMachine {
             // デフォルト: α-BIOS を生成してロード
             loadAlphaBIOSInternal()
         }
-
-        // ── DEBUG: Documents/ にある .rom を自動ロード ──
-        #if DEBUG
-        do {
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            if let files = try? FileManager.default.contentsOfDirectory(at: docs, includingPropertiesForKeys: nil) {
-                for file in files where file.pathExtension.lowercased() == "rom" {
-                    if let data = try? Data(contentsOf: file) {
-                        print("[DEBUG] Auto-loading: \(file.lastPathComponent) (\(data.count) bytes)")
-                        if loadCartridge(data: data) { reset(); break }
-                    }
-                }
-            }
-        }
-        #endif
     }
 
     /// Documents/BIOS/custom_bios.rom から読み込み
@@ -210,17 +166,6 @@ final class MSXMachine {
         }
         cpu.memWrite = { [unowned self] addr, val in
             let pc = self.cpu.PC
-            // Diagnostic: detect writes to mapper register range that are blocked by PC filter
-            if self.memory.megaROMData != nil && addr >= 0x4000 && addr < 0xC000 && pc < 0x4000 {
-                let page = Int(addr >> 14)
-                if Int(self.memory.pageSlot[page]) == self.memory.megaROMSlot {
-                    self.blockedMapperWrites += 1
-                    if self.blockedMapperWrites <= self.blockedMapperWriteLogLimit {
-                        print(String(format: "[FILTER] Blocked mapper write: addr=%04X val=%02X PC=%04X frame=%d slot=%02X",
-                                     addr, val, pc, self.frameCount, self.memory.primarySlotReg))
-                    }
-                }
-            }
             // Pass current PC to Memory.write for PC-based bank switch filtering.
             self.memory.write(addr, val, pc: pc)
         }
@@ -280,7 +225,6 @@ final class MSXMachine {
         case 0x98:          // VDP data read
             return vdp.readData()
         case 0x99:          // VDP status read
-            vdpStatusReadCount += 1
             return vdp.readStatus()
         case 0x9A:          // V9938 palette port (write only)
             return 0xFF
@@ -291,27 +235,11 @@ final class MSXMachine {
         case 0xA9:          // PPI Port B: Keyboard row data
             let row = Int(keyboardRow & 0x0F)
             let val = row < 9 ? memory.keyMatrix[row] : 0xFF
-            #if DEBUG
-            ppiReadCount += 1
-            if debugInputLog {
-                print(String(format: "[INPUT] PPI-B row=%d val=%02X", row, val))
-            }
-            #endif
             return val
         case 0xAA:          // PPI Port C: read back stored value
             return ppiPortC
         case 0xA2:          // PSG data read (read only mirror)
             let val = psg.readData()
-            #if DEBUG
-            if psg.addressLatch == 14 {
-                psgR14ReadCount += 1
-                if debugInputLog {
-                    let r15 = psg.regs[15]
-                    print(String(format: "[INPUT] PSG-R14 r15=%02X (row=%d joy=%d) val=%02X",
-                                 r15, r15 & 0x0F, (r15 >> 6) & 1, val))
-                }
-            }
-            #endif
             return val
         default:
             return 0xFF
@@ -323,30 +251,13 @@ final class MSXMachine {
         case 0x98:          // VDP data write
             vdp.writeData(value)
         case 0x99:          // VDP control write
-            let latchBefore = vdp.latchState
             vdp.writeControl(value)
-            // Debug: log VDP register writes
-            if debugVDP && latchBefore == 1 && vdp.latchState == 0 && (value & 0x80) != 0 {
-                let regNum = Int(value & 0x3F)
-                print(String(format: "[VDP] REG[%d] = 0x%02X  (PC=0x%04X)", regNum, regNum < vdp.regs.count ? vdp.regs[regNum] : 0, cpu.PC))
-            }
         case 0x9A:          // V9938 palette port
             vdp.writePalette(value)
         case 0x9B:          // V9938 indirect register port
             vdp.writeIndirectRegister(value)
         case 0xA8:          // PPI Port A: Primary slot register
             memory.primarySlotReg = value
-            // One-shot: log when C-BIOS maps page 1 → slot 1 (cartridge scan)
-            if debugCartScan && (value & 0x0C) == 0x04 {
-                print(String(format:
-                    "[MSX] C-BIOS cartridge scan: slotReg=0x%02X PC=0x%04X",
-                    value, Int(cpu.PC)))
-                debugCartScan = false
-            }
-            // Log slot register changes during early game init (after boot phase starts)
-            if slotChangeLogEnabled && cartridgeLoaded && slotChangeLog.count < 80 {
-                slotChangeLog.append((frame: frameCount, value: value, pc: cpu.PC))
-            }
         case 0xAA:          // PPI Port C: keyboard row select (bits 0-3) + misc
             ppiPortC = value
             keyboardRow = value & 0x0F
@@ -468,214 +379,6 @@ final class MSXMachine {
         return true
     }
 
-    // MARK: - Sprite Debug Dump to File
-    #if DEBUG
-    private func dumpSpriteDebugToFile() {
-        var lines = [String]()
-        let mode = vdp.screenMode
-        lines.append("=== Sprite Debug Dump (frame \(frameCount)) ===")
-        lines.append("Screen mode: \(mode)")
-        let regStr = (0..<16).map { String(format: "R%d=%02X", $0, vdp.regs[$0]) }.joined(separator: " ")
-        lines.append("VDP Regs: \(regStr)")
-
-        let satBase = vdp.spriteAttrBase
-        let patBase = vdp.spritePatBase
-        let isSM2 = (mode == .graphic4 || mode == .graphic5 || mode == .graphic6 || mode == .graphic7)
-        let colorTbl = isSM2 ? (satBase &- 512) : 0
-
-        lines.append(String(format: "SAT base: 0x%05X  Pat base: 0x%05X  Mode2: %@  ColorTbl: 0x%05X",
-                            satBase, patBase, isSM2 ? "YES" : "NO", colorTbl))
-        lines.append(String(format: "spriteSize: %d  spriteMag: %@  screenEnabled: %@",
-                            vdp.spriteSize, vdp.spriteMag ? "YES" : "NO", vdp.screenEnabled ? "YES" : "NO"))
-
-        // Dump SAT entries
-        lines.append("\n--- SAT entries ---")
-        let terminator = (vdp.regs[9] & 0x80 != 0) ? 0xD8 : 0xD0
-        for i in 0..<32 {
-            let a = satBase + i * 4
-            let sy = Int(vdp.vram[a & (VDP.vramSize - 1)])
-            let sx = Int(vdp.vram[(a+1) & (VDP.vramSize - 1)])
-            let sn = Int(vdp.vram[(a+2) & (VDP.vramSize - 1)])
-            let sc = Int(vdp.vram[(a+3) & (VDP.vramSize - 1)])
-            if sy == terminator {
-                lines.append(String(format: "sprite[%2d]: TERMINATOR (Y=0x%02X)", i, terminator))
-                break
-            }
-            if isSM2 {
-                let ct = colorTbl + i * 16
-                let colors = (0..<16).map { String(format: "%02X", vdp.vram[(ct + $0) & (VDP.vramSize - 1)]) }.joined(separator: " ")
-                lines.append(String(format: "sprite[%2d]: Y=%3d X=%3d name=%3d attr=%02X  CT: %@",
-                                    i, sy, sx, sn, sc, colors))
-            } else {
-                lines.append(String(format: "sprite[%2d]: Y=%3d X=%3d name=%3d color=%d EC=%d",
-                                    i, sy, sx, sn, sc & 0x0F, (sc >> 7) & 1))
-            }
-        }
-
-        // Dump pattern data for first few sprites
-        lines.append("\n--- Sprite Pattern data ---")
-        for i in 0..<min(4, 32) {
-            let a = satBase + i * 4
-            let sy = Int(vdp.vram[a & (VDP.vramSize - 1)])
-            if sy == terminator { break }
-            let sn = Int(vdp.vram[(a+2) & (VDP.vramSize - 1)])
-            let pAddr = patBase + sn * 8
-            let patBytes = (0..<32).map { String(format: "%02X", vdp.vram[(pAddr + $0) & (VDP.vramSize - 1)]) }.joined(separator: " ")
-            lines.append(String(format: "sprite[%d] name=%d pat@%05X: %@", i, sn, pAddr, patBytes))
-        }
-
-        // Check VRAM non-zero around SAT/color table
-        var satNZ = 0
-        for j in 0..<128 { if vdp.vram[(satBase + j) & (VDP.vramSize - 1)] != 0 { satNZ += 1 } }
-        var ctNZ = 0
-        for j in 0..<512 { if vdp.vram[(colorTbl + j) & (VDP.vramSize - 1)] != 0 { ctNZ += 1 } }
-        var patNZ = 0
-        for j in 0..<2048 { if vdp.vram[(patBase + j) & (VDP.vramSize - 1)] != 0 { patNZ += 1 } }
-        lines.append(String(format: "\nVRAM occupancy: SAT=%d/128 CT=%d/512 PAT=%d/2048", satNZ, ctNZ, patNZ))
-
-        // VDP Command execution counters
-        let cmdNames = ["STOP","?1","?2","?3","POINT","PSET","SRCH","LINE",
-                        "LMMV","LMMM","LMCM","LMMC","HMMV","HMMM","YMMM","HMMC"]
-        lines.append("\n--- VDP Command Counts ---")
-        for i in 0..<16 {
-            if vdp.commandEngine.cmdCounts[i] > 0 {
-                lines.append(String(format: "  %@ (0x%X): %d", cmdNames[i], i, vdp.commandEngine.cmdCounts[i]))
-            }
-        }
-
-        // VDP Command log (last 30 commands)
-        lines.append("\n--- VDP Command Log (last \(vdp.commandEngine.cmdLog.count)) ---")
-        for (idx, entry) in vdp.commandEngine.cmdLog.enumerated() {
-            let name = cmdNames[Int(entry.cmd)]
-            let logOp = entry.cmdReg & 0x0F
-            let tFlag = (logOp & 0x08) != 0
-            let opNames = ["IMP","AND","OR","XOR","NOT","?5","?6","?7"]
-            let opName = opNames[Int(logOp & 0x07)]
-            lines.append(String(format: "  [%2d] %@ reg=%02X SX=%d SY=%d DX=%d DY=%d NX=%d NY=%d CLR=%02X ARG=%02X op=%@%@",
-                idx, name, entry.cmdReg, entry.sx, entry.sy, entry.dx, entry.dy, entry.nx, entry.ny,
-                entry.clr, entry.arg, opName, tFlag ? "+T" : ""))
-        }
-
-        // VRAM page scan: count non-zero bytes per 32-line block
-        lines.append("\n--- VRAM Page Scan (non-zero bytes per 32-line block, SCREEN 5) ---")
-        for blockY in stride(from: 0, to: 1024, by: 32) {
-            var nz = 0
-            let baseAddr = blockY * 128
-            for offset in 0..<(32 * 128) {
-                if vdp.vram[(baseAddr + offset) & (VDP.vramSize - 1)] != 0 { nz += 1 }
-            }
-            if nz > 0 {
-                let page = blockY / 256
-                let localY = blockY % 256
-                lines.append(String(format: "  Y=%4d-%4d (page%d Y%d-%d) addr=%05X: %d/%d non-zero",
-                    blockY, blockY+31, page, localY, localY+31,
-                    baseAddr & (VDP.vramSize - 1), nz, 32*128))
-            }
-        }
-
-        // Dump specific VRAM lines in visible area (Y=80-120, center of game area)
-        lines.append("\n--- VRAM visible area sample (Y=96-99, page 0) ---")
-        for y in 96..<100 {
-            let rowBase = y * 128
-            let rowBytes = (0..<128).map { String(format: "%02X", vdp.vram[(rowBase + $0) & (VDP.vramSize - 1)]) }
-            // Show first 64 bytes (128 pixels)
-            lines.append(String(format: "  Y=%3d: %@", y, rowBytes.prefix(64).joined(separator: " ")))
-        }
-
-        let text = lines.joined(separator: "\n")
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let fileURL = docs.appendingPathComponent("sprite_debug.txt")
-        try? text.write(to: fileURL, atomically: true, encoding: .utf8)
-        print("[DEBUG] Sprite debug written to \(fileURL.path)")
-    }
-    #endif
-
-    // MARK: - VDP State Dump (diagnostic)
-    private func dumpVDPState() {
-        let nameBase = vdp.nameTableBase
-        // GFX2 uses masked addresses (only top bit matters for each table)
-        let isGFX2 = vdp.screenMode == .graphicsII
-        let patBase  = isGFX2 ? (vdp.patternTableBase & 0x2000) : vdp.patternTableBase
-        let colBase  = isGFX2 ? (vdp.colorTableBase   & 0x2000) : vdp.colorTableBase
-
-        // Dump all 8 VDP registers
-        print(String(format:
-            "[VDP DUMP frame=%d] REG: %02X %02X %02X %02X %02X %02X %02X %02X  mode=%@",
-            frameCount,
-            Int(vdp.regs[0]), Int(vdp.regs[1]), Int(vdp.regs[2]), Int(vdp.regs[3]),
-            Int(vdp.regs[4]), Int(vdp.regs[5]), Int(vdp.regs[6]), Int(vdp.regs[7]),
-            isGFX2 ? "GFX2" : "other"))
-
-        // Show table base addresses (GFX2-corrected)
-        print(String(format:
-            "[VDP DUMP frame=%d] nameBase=%04X patBase=%04X colBase=%04X (GFX2-masked=%@)",
-            frameCount, nameBase, patBase, colBase, isGFX2 ? "yes" : "no"))
-
-        // Name table: full 24 rows × 32 cols dump
-        for r in 0..<24 {
-            let rowHex = (0..<32).map { String(format: "%02X", vdp.vram[(nameBase + r*32 + $0) & 0x3FFF]) }.joined(separator: " ")
-            print("[VDP DUMP frame=\(frameCount)] name[row\(String(format:"%02d",r))]: \(rowHex)")
-        }
-
-        // Pattern table: first 32 bytes (GFX2-corrected base)
-        let patHex = (0..<32).map { String(format: "%02X", vdp.vram[(patBase + $0) & 0x3FFF]) }.joined(separator: " ")
-        print("[VDP DUMP frame=\(frameCount)] pat [\(String(format:"%04X", patBase))]: \(patHex)")
-
-        // Color table: first 32 bytes (GFX2-corrected base)
-        let colHex = (0..<32).map { String(format: "%02X", vdp.vram[(colBase + $0) & 0x3FFF]) }.joined(separator: " ")
-        print("[VDP DUMP frame=\(frameCount)] col [\(String(format:"%04X", colBase))]: \(colHex)")
-
-        if isGFX2 {
-            // In GFX2, also check char 0xF0 (common game char) pattern & color
-            let char = 0xF0
-            let patF0 = (0..<8).map { String(format: "%02X", vdp.vram[(patBase + char*8 + $0) & 0x3FFF]) }.joined(separator: " ")
-            let colF0 = (0..<8).map { String(format: "%02X", vdp.vram[(colBase + char*8 + $0) & 0x3FFF]) }.joined(separator: " ")
-            print(String(format: "[VDP DUMP frame=%d] pat[%04X] (char 0xF0): %@",
-                         frameCount, (patBase + char*8) & 0x3FFF, patF0))
-            print(String(format: "[VDP DUMP frame=%d] col[%04X] (char 0xF0): %@",
-                         frameCount, (colBase + char*8) & 0x3FFF, colF0))
-
-            // Count non-zero bytes in each major region
-            let patRegion = vdp.vram[0..<0x1800].filter { $0 != 0 }.count
-            let nameRegion = vdp.vram[0x1800..<0x2000].filter { $0 != 0 }.count
-            let colRegion  = vdp.vram[0x2000..<0x3800].filter { $0 != 0 }.count
-            print("[VDP DUMP frame=\(frameCount)] non-zero: pat(0000-17FF)=\(patRegion)  name(1800-1FFF)=\(nameRegion)  col(2000-37FF)=\(colRegion)")
-        }
-
-        // Sprite attribute table and pattern table
-        let spAttrBase = Int(vdp.regs[5] & 0x7F) << 7
-        let spPatBase  = Int(vdp.regs[6] & 0x07) << 11
-        let spSize = (vdp.regs[1] & 0x02) != 0 ? 16 : 8
-        print(String(format: "[VDP DUMP frame=%d] sprite: attrBase=%04X patBase=%04X size=%d",
-                     frameCount, spAttrBase, spPatBase, spSize))
-        // First 4 sprites
-        for i in 0..<4 {
-            let a = spAttrBase + i * 4
-            let sy = Int(vdp.vram[a & 0x3FFF])
-            let sx = Int(vdp.vram[(a+1) & 0x3FFF])
-            let sn = Int(vdp.vram[(a+2) & 0x3FFF])
-            let sc = Int(vdp.vram[(a+3) & 0x3FFF])
-            if sy == 0xD0 {
-                print(String(format: "[VDP DUMP frame=%d] sprite[%d]: TERMINATOR", frameCount, i)); break
-            }
-            let p0 = vdp.vram[(spPatBase + sn*8) & 0x3FFF]
-            print(String(format: "[VDP DUMP frame=%d] sprite[%d]: y=%3d x=%3d name=%3d color=%d pat[0]=%02X",
-                         frameCount, i, sy, sx, sn, sc & 0x0F, p0))
-        }
-        // Sprite pattern table fill
-        let spPatNZ = (0..<2048).filter { vdp.vram[(spPatBase + $0) & 0x3FFF] != 0 }.count
-        print("[VDP DUMP frame=\(frameCount)] sprite pat(\(String(format:"%04X",spPatBase))): \(spPatNZ)/2048 non-zero")
-
-        // JIFFY counter
-        let jiffy = memory.read(0xFC9E)
-        print("[VDP DUMP frame=\(frameCount)] JIFFY(0xFC9E)=\(jiffy)")
-
-        // Total VRAM stats
-        let nonZero = vdp.vram.filter { $0 != 0 }.count
-        let nonFF   = vdp.vram.filter { $0 != 0xFF }.count
-        print("[VDP DUMP frame=\(frameCount)] VRAM total: \(nonZero) non-zero, \(nonFF) non-FF bytes out of \(VDP.vramSize)")
-    }
-
     // MARK: - ZIP ROM Extraction
 
     /// Scan a ZIP archive and return the data of the first .rom or .bin entry.
@@ -777,21 +480,8 @@ final class MSXMachine {
         // Full VDP reset: registers, VRAM, status, latches, palette, commands
         vdp.reset()
         cycleBudget = 0
-        // Reset debug counters so we see fresh logs after reset
         frameCount = 0
-        debugVDP = false
-        debugCartScan = false
-        lastScreenEnabled = false
-        megaROMWriteLogCount = 0
-        initAddressHitLogged = false
-        blockedMapperWrites = 0
-        spInCartAreaLogged = false
-        lastSPLogValue = 0
         gameStartFired = false      // 次のカートリッジブートで再度コールバックを許可
-        vdp.debugRenderGFX2 = false
-        vdp.debugPixelCount = false
-        vdp.debugSpriteSAT  = false
-        vdp.debugRenderGFX4 = false
 
         // Disk mode: re-install Disk ROM stub in slot 1 (RAM was cleared above)
         if diskMode {
@@ -829,484 +519,8 @@ final class MSXMachine {
             DispatchQueue.main.async { cb?() }
         }
 
-        // Track screenEnabled transitions (silent)
-        let se = vdp.screenEnabled
-        if se != lastScreenEnabled {
-            lastScreenEnabled = se
-            if se { vdp.debugPixelCount = true }
-        }
-
-        // Debug: log at frame 1 only (periodic logging disabled to reduce noise)
-        if frameCount == 1 {
-            let seStr = vdp.screenEnabled ? "YES" : "no"
-            let modeStr: String
-            let isGFX2 = vdp.screenMode == .graphicsII
-            switch vdp.screenMode {
-            case .text:       modeStr = "TEXT"
-            case .graphicsI:  modeStr = "GFX1"
-            case .graphicsII: modeStr = "GFX2"
-            case .multicolor: modeStr = "MCOL"
-            case .graphic3:   modeStr = "GFX3"
-            case .graphic4:   modeStr = "GFX4"
-            case .graphic5:   modeStr = "GFX5"
-            case .graphic6:   modeStr = "GFX6"
-            case .graphic7:   modeStr = "GFX7"
-            }
-            let nameBase = vdp.nameTableBase
-            // Use GFX2-corrected patBase for meaningful diagnostic
-            let patBase  = isGFX2 ? (vdp.patternTableBase & 0x2000) : vdp.patternTableBase
-            let vramName = Int(vdp.vram[nameBase & 0x3FFF])
-            let vramPat  = Int(vdp.vram[patBase  & 0x3FFF])
-            // Count unique tiles in name table (768 bytes) to detect real game graphics
-            let nameTableBytes = (0..<768).map { vdp.vram[(nameBase + $0) & 0x3FFF] }
-            let uniqueTiles = Set(nameTableBytes).count
-            // JIFFY counter at 0xFC9E: incremented by C-BIOS VBlank ISR each frame
-            let jiffy = memory.read(0xFC9E)
-            // Sprite pattern table non-zero count (spot-check)
-            let spPatBase = Int(vdp.regs[6] & 0x07) << 11
-            let spPatNZ = (0..<256).filter { vdp.vram[(spPatBase + $0) & 0x3FFF] != 0 }.count
-            // Sample pixel at center of rendered frame (reflects actual display content)
-            let cx = VDP.screenWidth / 2, cy = VDP.screenHeight / 2
-            let centerPix = screenPixels[cy * VDP.screenWidth + cx]
-            // Also sample top-left area (row 1, col 5) to detect title/score area
-            let topPix = screenPixels[8 * VDP.screenWidth + 40]
-            print(String(format:
-                "[MSX frame=%d] PC=%04X SP=%04X slot=%02X " +
-                "R0=%02X R1=%02X R2=%02X R3=%02X R4=%02X R7=%02X " +
-                "mode=\(modeStr) screen=\(seStr) JIFFY=%d " +
-                "name@%04X=%02X uniqueTiles=%d pat@%04X(gfx2=%@)=%02X spPatNZ=%d " +
-                "pix[center]=%08X pix[top]=%08X",
-                frameCount, Int(cpu.PC), Int(cpu.SP), Int(memory.primarySlotReg),
-                Int(vdp.regs[0]), Int(vdp.regs[1]), Int(vdp.regs[2]),
-                Int(vdp.regs[3]), Int(vdp.regs[4]), Int(vdp.regs[7]),
-                Int(jiffy),
-                nameBase, vramName, uniqueTiles, patBase, isGFX2 ? "yes" : "no", vramPat,
-                spPatNZ,
-                centerPix, topPix))
-        }
-
-        // VDP+VRAM state dump (disabled - game never reaches SCREEN 5)
-        // if frameCount == 180 || frameCount == 300 || frameCount == 420 { dumpVDPState() }
-
-        // ── Periodic sprite / VDP command diagnostic (SCREEN 5 games) ──
-        if cartridgeLoaded && (frameCount == 300 || frameCount == 600 || frameCount == 900) {
-            let mode = vdp.screenMode
-            let r8 = vdp.regs[8]
-            let spd = (r8 & 0x02) != 0  // Sprite Disable
-            let r1 = vdp.regs[1]
-            let sprSize = (r1 & 0x02 != 0) ? 16 : 8
-            let sprMag = (r1 & 0x01 != 0) ? 2 : 1
-            // Sprite render stats from VDP
-            print(String(format: "[SPR DIAG @%d] spriteRenderFrames=%d lastPixels=%d (frames where SPD=0 and sprites drawn)",
-                         frameCount, vdp.spriteRenderCount, vdp.lastSpritePixelCount))
-            let attrBase = vdp.spriteAttrBase
-            let patBase = vdp.spritePatBase
-            let lines = vdp.activeLines
-            let terminator = lines > 192 ? 0xD8 : 0xD0
-
-            print(String(format: "[SPR DIAG @%d] mode=%@ R#1=%02X R#5=%02X R#6=%02X R#8=%02X R#11=%02X SPD=%d size=%d mag=%d",
-                         frameCount, "\(mode)", r1, vdp.regs[5], vdp.regs[6], r8, vdp.regs[11],
-                         spd ? 1 : 0, sprSize, sprMag))
-            print(String(format: "[SPR DIAG @%d] attrBase=%05X patBase=%05X lines=%d term=0x%02X",
-                         frameCount, attrBase, patBase, lines, terminator))
-
-            // Dump first 8 sprite entries from SAT
-            var activeCount = 0
-            for i in 0..<min(32, 8) {
-                let a = attrBase + i * 4
-                let sy = Int(vdp.vram[a & (VDP.vramSize - 1)])
-                if sy == terminator {
-                    print(String(format: "[SPR DIAG @%d] sprite[%d]: TERMINATOR (0x%02X) — %d active sprites",
-                                 frameCount, i, terminator, activeCount))
-                    break
-                }
-                activeCount += 1
-                let sx = Int(vdp.vram[(a+1) & (VDP.vramSize - 1)])
-                let sn = Int(vdp.vram[(a+2) & (VDP.vramSize - 1)])
-                let sa = vdp.vram[(a+3) & (VDP.vramSize - 1)]
-
-                // Check pattern data (first 8 bytes)
-                let patAddr = patBase + sn * 8
-                var patNonZero = 0
-                var patBytes = [String]()
-                let patSize = sprSize == 16 ? 32 : 8  // 16x16 uses 4 patterns
-                for j in 0..<patSize {
-                    let b = vdp.vram[(patAddr + j) & (VDP.vramSize - 1)]
-                    if b != 0 { patNonZero += 1 }
-                    if j < 8 { patBytes.append(String(format: "%02X", b)) }
-                }
-
-                // Mode 2 color table
-                let isSM2 = (mode == .graphic3 || mode == .graphic4 || mode == .graphic5 ||
-                              mode == .graphic6 || mode == .graphic7)
-                var colorStr = ""
-                if isSM2 {
-                    let colorBase = attrBase &- 512
-                    var colors = [String]()
-                    for j in 0..<min(sprSize, 16) {
-                        let cb = vdp.vram[(colorBase + i * 16 + j) & (VDP.vramSize - 1)]
-                        colors.append(String(format: "%02X", cb))
-                    }
-                    colorStr = " ct=[\(colors.joined(separator: " "))]"
-                }
-
-                print(String(format: "[SPR DIAG @%d] sprite[%d]: y=%3d x=%3d name=%3d attr=%02X patNZ=%d/%d pat0=[%@]%@",
-                             frameCount, i, sy, sx, sn, sa, patNonZero, patSize,
-                             patBytes.joined(separator: " "), colorStr))
-
-                if i == 7 && activeCount == 8 {
-                    print(String(format: "[SPR DIAG @%d] (showing first 8 of possibly more sprites)", frameCount))
-                }
-            }
-
-            // VDP command engine summary
-            let ce = vdp.commandEngine!
-            let cmdNames = ["STOP","?1","?2","?3","POINT","PSET","SRCH","LINE",
-                            "LMMV","LMMM","LMCM","LMMC","HMMV","HMMM","YMMM","HMMC"]
-            var cmdSummary = [String]()
-            for j in 0..<16 {
-                if ce.cmdCounts[j] > 0 {
-                    cmdSummary.append("\(cmdNames[j])=\(ce.cmdCounts[j])")
-                }
-            }
-            print(String(format: "[SPR DIAG @%d] VDP cmds: %@ hmmm_play=%d hmmm_status=%d lmmm_play=%d",
-                         frameCount,
-                         cmdSummary.isEmpty ? "(none)" : cmdSummary.joined(separator: " "),
-                         ce.hmmmPlayArea, ce.hmmmStatusBar, ce.lmmmPlayArea))
-
-            // Last 5 VDP commands from log
-            let logCount = min(ce.cmdLog.count, 5)
-            if logCount > 0 {
-                for j in (ce.cmdLog.count - logCount)..<ce.cmdLog.count {
-                    let e = ce.cmdLog[j]
-                    print(String(format: "[SPR DIAG @%d] cmdLog[%d]: %@ SX=%d SY=%d DX=%d DY=%d NX=%d NY=%d CLR=%02X ARG=%02X",
-                                 frameCount, j, cmdNames[Int(e.cmd)], e.sx, e.sy, e.dx, e.dy, e.nx, e.ny, e.clr, e.arg))
-                }
-            }
-
-            // VRAM stats for sprite areas
-            var patAreaNZ = 0
-            for j in 0..<(256 * 8) {  // check first 256 patterns (2KB)
-                if vdp.vram[(patBase + j) & (VDP.vramSize - 1)] != 0 { patAreaNZ += 1 }
-            }
-            print(String(format: "[SPR DIAG @%d] patArea(%05X): %d/2048 non-zero bytes",
-                         frameCount, patBase, patAreaNZ))
-
-            // ── VRAM scan: find actual SAT location ──
-            // Scan candidate addresses (128-byte aligned) around the expected region
-            // and dump hex to find where the real SAT data is
-            let scanStart = max(0, attrBase - 0x400)  // 1KB before current attrBase
-            let scanEnd = min(VDP.vramSize, attrBase + 0x400)  // 1KB after
-            print(String(format: "[VRAM SCAN @%d] Scanning %05X-%05X for SAT-like data (current attrBase=%05X):",
-                         frameCount, scanStart, scanEnd, attrBase))
-
-            // Also compute alternative SAT addresses for comparison
-            let altBase_FC = (Int(vdp.regs[11] & 0x03) << 15) | (Int(vdp.regs[5] & 0xFC) << 7)
-            let altSAT_FC = altBase_FC + 0x200
-            let altSAT_FE = (Int(vdp.regs[11] & 0x03) << 15) | (Int(vdp.regs[5] & 0xFE) << 7)
-            let altSAT_A7 = altSAT_FE | 0x80
-            print(String(format: "[VRAM SCAN @%d] Candidates: &FC+200=%05X  &FE=%05X  &FE|80=%05X  current=%05X",
-                         frameCount, altSAT_FC, altSAT_FE, altSAT_A7, attrBase))
-
-            // Dump 32 bytes at each candidate address
-            for candidate in [altSAT_FE, altSAT_A7, altSAT_FC, altSAT_FC - 0x80, altSAT_FC + 0x80] {
-                let addr = candidate & (VDP.vramSize - 1)
-                var bytes = [String]()
-                var nz = 0
-                for j in 0..<32 {
-                    let b = vdp.vram[(addr + j) & (VDP.vramSize - 1)]
-                    bytes.append(String(format: "%02X", b))
-                    if b != 0 { nz += 1 }
-                }
-                // Also check full 128 bytes for non-zero count
-                var nz128 = 0
-                for j in 0..<128 {
-                    if vdp.vram[(addr + j) & (VDP.vramSize - 1)] != 0 { nz128 += 1 }
-                }
-                print(String(format: "[VRAM SCAN @%d] @%05X (nz=%d/128): %@",
-                             frameCount, addr, nz128, bytes.joined(separator: " ")))
-            }
-
-            // Dump full 0xF000-0xF800 with non-zero summary per 128-byte block
-            print(String(format: "[VRAM SCAN @%d] Block non-zero summary:", frameCount))
-            var blockSummary = [String]()
-            let blkStart = attrBase & 0x1F000  // align to 4KB page
-            for blk in stride(from: blkStart, to: min(blkStart + 0x1000, VDP.vramSize), by: 128) {
-                var nzBlock = 0
-                for j in 0..<128 {
-                    if vdp.vram[(blk + j) & (VDP.vramSize - 1)] != 0 { nzBlock += 1 }
-                }
-                if nzBlock > 0 {
-                    blockSummary.append(String(format: "%05X:%d", blk, nzBlock))
-                }
-            }
-            print(String(format: "[VRAM SCAN @%d] %@", frameCount, blockSummary.joined(separator: " ")))
-        }
-
-        // ── Display page & VRAM content diagnostic (SCREEN 5 games) ──
-        if cartridgeLoaded && (frameCount == 1200 || frameCount == 1800) {
-            let mode = vdp.screenMode
-            if mode == .graphic4 || mode == .graphic5 || mode == .graphic6 || mode == .graphic7 {
-                let r0 = vdp.regs[0], r1 = vdp.regs[1], r2 = vdp.regs[2]
-                let r8 = vdp.regs[8], r9 = vdp.regs[9], r14 = vdp.regs[14], r23 = vdp.regs[23]
-                let page = (Int(r2) >> 5) & 0x03
-                let pageOff = page * 0x08000
-                let scroll = Int(r23)
-
-                print(String(format: "[GFX DIAG @%d] mode=%@ R#0=%02X R#1=%02X R#2=%02X(page=%d) R#8=%02X R#9=%02X R#14=%02X R#23=%02X(scroll=%d)",
-                             frameCount, "\(mode)", r0, r1, r2, page, r8, r9, r14, scroll))
-
-                // Count non-zero bytes in displayed VRAM area
-                let bpr = vdp.bytesPerPixelRow
-                let lines = vdp.activeLines
-                var nzTotal = 0, nzTop = 0, nzMid = 0, nzBot = 0
-                for y in 0..<lines {
-                    let vramY = (y + scroll) & 0xFF
-                    let rowBase = pageOff + vramY * bpr
-                    for x in 0..<bpr {
-                        if vdp.vram[(rowBase + x) & (VDP.vramSize - 1)] != 0 {
-                            nzTotal += 1
-                            if y < 64 { nzTop += 1 }
-                            else if y < 148 { nzMid += 1 }
-                            else { nzBot += 1 }
-                        }
-                    }
-                }
-                print(String(format: "[GFX DIAG @%d] displayVRAM non-zero: total=%d top(0-63)=%d mid(64-147)=%d bot(148-%d)=%d / %d bytes",
-                             frameCount, nzTotal, nzTop, nzMid, lines-1, nzBot, lines * bpr))
-
-                // Dump a few VRAM rows from display center
-                let midY = (106 + scroll) & 0xFF
-                let midBase = pageOff + midY * bpr
-                let row = (0..<32).map { String(format: "%02X", vdp.vram[(midBase + $0) & (VDP.vramSize - 1)]) }
-                print(String(format: "[GFX DIAG @%d] VRAM row y=%d (display y=106): %@",
-                             frameCount, midY, row.joined(separator: " ")))
-
-                // Also check page 1 (where tile bank might be)
-                var nzPage1 = 0
-                for i in 0..<0x8000 {
-                    if vdp.vram[(0x08000 + i) & (VDP.vramSize - 1)] != 0 { nzPage1 += 1 }
-                }
-                print(String(format: "[GFX DIAG @%d] page1(0x08000-0x0FFFF) non-zero: %d/32768",
-                             frameCount, nzPage1))
-
-                // Palette dump
-                let pal = (0..<16).map { String(format: "%08X", vdp.palette[$0]) }.joined(separator: " ")
-                print(String(format: "[GFX DIAG @%d] palette: %@", frameCount, pal))
-
-                // R#14 value and VRAM direct write stats
-                print(String(format: "[GFX DIAG @%d] directWrites: page0=%d page1=%d reads: page0=%d page1=%d r14set=%@",
-                             frameCount,
-                             vdp.directWriteCountPage0, vdp.directWriteCountPage1,
-                             vdp.directReadCountPage0, vdp.directReadCountPage1,
-                             vdp.r14ExplicitlySet ? "YES" : "NO"))
-            }
-        }
-
-        // ── White pixel diagnostic (SCREEN 5) ──
-        // Scan visible VRAM area for color 15 (white) pixels to identify
-        // the source of "diagonal white lines" artifact.
-        if cartridgeLoaded && (frameCount == 300 || frameCount == 600) {
-            let mode = vdp.screenMode
-            if mode == .graphic4 {
-                let page = (Int(vdp.regs[2]) >> 5) & 0x03
-                let pageOffset = page * 0x08000
-                var white4bppCount = 0
-                var firstWhiteLocations = [String]()
-                for y in 0..<vdp.activeLines {
-                    for xByte in 0..<128 {
-                        let addr = (pageOffset + y * 128 + xByte) & (VDP.vramSize - 1)
-                        let b = vdp.vram[addr]
-                        let hiNibble = (b >> 4) & 0x0F
-                        let loNibble = b & 0x0F
-                        if hiNibble == 0x0F {
-                            white4bppCount += 1
-                            if firstWhiteLocations.count < 10 {
-                                firstWhiteLocations.append(String(format: "(%d,%d)=F_", xByte * 2, y))
-                            }
-                        }
-                        if loNibble == 0x0F {
-                            white4bppCount += 1
-                            if firstWhiteLocations.count < 10 {
-                                firstWhiteLocations.append(String(format: "(%d,%d)=_F", xByte * 2 + 1, y))
-                            }
-                        }
-                    }
-                }
-                print(String(format: "[WHITE DIAG @%d] page=%d white(0xF) pixels=%d  first: %@",
-                             frameCount, page, white4bppCount,
-                             firstWhiteLocations.isEmpty ? "none" : firstWhiteLocations.joined(separator: " ")))
-                // Also dump palette entry 15 to see what "white" maps to
-                let pal15 = vdp.palette[15]
-                print(String(format: "[WHITE DIAG @%d] palette[15]=%08X  LINE cmd count=%d",
-                             frameCount, pal15, vdp.commandEngine.cmdCounts[7]))
-            }
-        }
-
-        // Auto keypress injection disabled (game doesn't boot yet)
-        #if DEBUG
-        #endif
-
-        // Early-frame diagnostics: track boot progress of MegaROM games
-        if cartridgeLoaded && (frameCount == 5 || frameCount == 10 || frameCount == 50 || frameCount == 170) {
-            let htimi0 = memory.ram[0xFD9F]  // H.TIMI hook byte 0
-            let htimi1 = memory.ram[0xFDA0]
-            let htimi2 = memory.ram[0xFDA1]
-            let hstke0 = memory.ram[0xFEDA]  // H.STKE hook byte 0
-            let hstke1 = memory.ram[0xFEDB]
-            let hstke2 = memory.ram[0xFEDC]
-            let msxVer = memory.read(0x002D)  // via slot mapping (page 0)
-            print(String(format: "[BOOT @%d] PC=%04X SP=%04X SLOT=%02X banks=[%d,%d,%d,%d] bankSW=%d",
-                         frameCount, cpu.PC, cpu.SP, memory.primarySlotReg,
-                         memory.megaROMBanks[0], memory.megaROMBanks[1],
-                         memory.megaROMBanks[2], memory.megaROMBanks[3],
-                         memory.bankSwitchCount))
-            print(String(format: "[BOOT @%d] R#0=%02X R#1=%02X mode=%@ H.TIMI=%02X %02X %02X H.STKE=%02X %02X %02X MSXVER=%d",
-                         frameCount, vdp.regs[0], vdp.regs[1], "\(vdp.screenMode)",
-                         htimi0, htimi1, htimi2, hstke0, hstke1, hstke2, msxVer))
-            // Extended diagnostics: IFF state, VDP reads, CPU registers
-            print(String(format: "[BOOT @%d] IFF1=%d IFF2=%d IM=%d halted=%d A=%02X HL=%04X DE=%04X BC=%04X vdpStatRd=%d",
-                         frameCount,
-                         cpu.IFF1 ? 1 : 0, cpu.IFF2 ? 1 : 0, cpu.IM, cpu.halted ? 1 : 0,
-                         cpu.A, UInt16(cpu.H) << 8 | UInt16(cpu.L),
-                         UInt16(cpu.D) << 8 | UInt16(cpu.E),
-                         UInt16(cpu.B) << 8 | UInt16(cpu.C),
-                         vdpStatusReadCount))
-            // Dump RAM/code around current PC (32 bytes)
-            let pc = Int(cpu.PC)
-            var codeBytes = [String]()
-            for i in 0..<32 {
-                let addr = (pc + i) & 0xFFFF
-                codeBytes.append(String(format: "%02X", memory.ram[addr]))
-            }
-            print(String(format: "[BOOT @%d] RAM@PC(%04X): %@",
-                         frameCount, pc, codeBytes.joined(separator: " ")))
-            // Also dump what memory.read() returns (respects slot mapping)
-            var slotBytes = [String]()
-            for i in 0..<32 {
-                let addr = UInt16(truncatingIfNeeded: pc + i)
-                slotBytes.append(String(format: "%02X", memory.read(addr)))
-            }
-            print(String(format: "[BOOT @%d] MEM@PC(%04X): %@",
-                         frameCount, pc, slotBytes.joined(separator: " ")))
-            // PC filter diagnostic summary
-            print(String(format: "[BOOT @%d] blockedMapperWrites=%d initHit=%@",
-                         frameCount, blockedMapperWrites,
-                         initAddressHitLogged ? "YES" : "no"))
-            // Dump what the cartridge header looks like from slot 1
-            if let slot1 = memory.slots[1] {
-                let h0 = slot1[0x4000], h1 = slot1[0x4001], h2 = slot1[0x4002], h3 = slot1[0x4003]
-                print(String(format: "[BOOT @%d] Cart slot1 header: %02X %02X INIT=%04X  MegaROM@4000=%02X",
-                             frameCount, h0, h1, UInt16(h3) << 8 | UInt16(h2),
-                             memory.megaROMData != nil ? memory.megaROMData![0] : 0xFF))
-            }
-
-        }
-
-        // Dump PC trace at frame 52 (after capturing frames 48-52)
-        if cartridgeLoaded && frameCount == 52 && !pcTraceBuffer.isEmpty {
-            print("[TRACE @52] PC trace (\(pcTraceBuffer.count) samples, frames 48-52):")
-            // Show first 100 PCs with opcodes
-            let count = min(pcTraceBuffer.count, 100)
-            var traceLines = [String]()
-            for i in 0..<count {
-                let pc = pcTraceBuffer[i]
-                // Read opcode from RAM (the game runs from RAM)
-                let op = memory.ram[Int(pc)]
-                let op2 = memory.ram[Int((pc &+ 1) & 0xFFFF)]
-                let op3 = memory.ram[Int((pc &+ 2) & 0xFFFF)]
-                traceLines.append(String(format: "%04X:%02X %02X %02X", pc, op, op2, op3))
-            }
-            // Print in groups of 10 for readability
-            for start in stride(from: 0, to: traceLines.count, by: 10) {
-                let end = min(start + 10, traceLines.count)
-                print("[TRACE] \(traceLines[start..<end].joined(separator: "  "))")
-            }
-            // Also show PC frequency histogram
-            var hist = [UInt16: Int]()
-            for pc in pcTraceBuffer { hist[pc, default: 0] += 1 }
-            let sorted = hist.sorted { $0.value > $1.value }.prefix(20)
-            let histStr = sorted.map { String(format: "%04X×%d", $0.key, $0.value) }
-            print("[TRACE] Top PCs: \(histStr.joined(separator: " "))")
-            pcTraceBuffer.removeAll()
-        }
-
-        // Dump PC trace at frame 175 (after game INIT should have run)
-        if cartridgeLoaded && frameCount == 175 && !pcTraceBuffer.isEmpty {
-            print("[TRACE @175] PC trace (\(pcTraceBuffer.count) samples, frames 170-175):")
-            var hist = [UInt16: Int]()
-            for pc in pcTraceBuffer { hist[pc, default: 0] += 1 }
-            let sorted = hist.sorted { $0.value > $1.value }.prefix(20)
-            let histStr = sorted.map { String(format: "%04X×%d", $0.key, $0.value) }
-            print("[TRACE @175] Top PCs: \(histStr.joined(separator: " "))")
-            pcTraceBuffer.removeAll()
-        }
-
-        // Dump slot change log at frame 55
-        if cartridgeLoaded && frameCount == 55 && !slotChangeLog.isEmpty {
-            print("[SLOT LOG] \(slotChangeLog.count) slot changes during boot:")
-            for (i, entry) in slotChangeLog.enumerated() {
-                print(String(format: "[SLOT #%d] frame=%d slotReg=%02X PC=%04X (p0=%d p1=%d p2=%d p3=%d)",
-                             i, entry.frame, entry.value, entry.pc,
-                             entry.value & 0x03, (entry.value >> 2) & 0x03,
-                             (entry.value >> 4) & 0x03, (entry.value >> 6) & 0x03))
-            }
-            slotChangeLogEnabled = false  // stop logging
-        }
-
-        // Late diagnostic: dump game state at frame 200/300 for games that seem stuck
-        if cartridgeLoaded && (frameCount == 200 || frameCount == 300) {
-            let mode = vdp.screenMode
-            let se = vdp.screenEnabled
-            // Count non-zero bytes in VRAM bitmap area (first 27KB = 212 lines × 128 bytes)
-            var vramNZ = 0
-            for i in 0..<(212 * 128) {
-                if vdp.vram[i] != 0 { vramNZ += 1 }
-            }
-            // VDP command engine stats
-            let cmdTotal = vdp.commandEngine.cmdCounts.reduce(0, +)
-            let hmmvCount = vdp.commandEngine.cmdCounts[0xC]
-            let hmmmCount = vdp.commandEngine.cmdCounts[0xD]
-            let lmmvCount = vdp.commandEngine.cmdCounts[0x8]
-            let lmmmCount = vdp.commandEngine.cmdCounts[0x9]
-            // H.TIMI hook state
-            let htimi0 = memory.ram[0xFD9F]
-            let htimi1 = memory.ram[0xFDA0]
-            let htimi2 = memory.ram[0xFDA1]
-            // Palette summary (count non-black entries)
-            var palNonBlack = 0
-            for i in 0..<16 { if vdp.palette[i] != 0x000000FF { palNonBlack += 1 } }
-            print(String(format: "[LATE DIAG @%d] PC=%04X SP=%04X SLOT=%02X mode=%@ screen=%@ banks=[%d,%d,%d,%d]",
-                         frameCount, cpu.PC, cpu.SP, memory.primarySlotReg,
-                         "\(mode)", se ? "ON" : "OFF",
-                         memory.megaROMBanks[0], memory.megaROMBanks[1],
-                         memory.megaROMBanks[2], memory.megaROMBanks[3]))
-            print(String(format: "[LATE DIAG @%d] R#0=%02X R#1=%02X R#2=%02X R#8=%02X R#9=%02X R#15=%02X R#17=%02X",
-                         frameCount, vdp.regs[0], vdp.regs[1], vdp.regs[2],
-                         vdp.regs[8], vdp.regs[9], vdp.regs[15], vdp.regs[17]))
-            print(String(format: "[LATE DIAG @%d] VRAM-NZ=%d/27136 cmds=%d (HMMV=%d HMMM=%d LMMV=%d LMMM=%d)",
-                         frameCount, vramNZ, cmdTotal, hmmvCount, hmmmCount, lmmvCount, lmmmCount))
-            print(String(format: "[LATE DIAG @%d] H.TIMI=%02X %02X %02X palNonBlack=%d IFF1=%d bankSW=%d indirectWr=%d",
-                         frameCount, htimi0, htimi1, htimi2, palNonBlack,
-                         cpu.IFF1 ? 1 : 0, memory.bankSwitchCount, vdp.indirectWriteCount))
-            // Palette dump
-            let palStr = (0..<16).map { String(format: "%08X", vdp.palette[$0]) }.joined(separator: " ")
-            print(String(format: "[LATE DIAG @%d] palette: %@", frameCount, palStr))
-        }
-
-        // debugVDP is false by default; no need to turn off
-
-        // Enable PC trace for specific frames to diagnose stuck loops
-        pcTraceEnabled = ((frameCount >= 48 && frameCount <= 52) || (frameCount >= 170 && frameCount <= 175)) && cartridgeLoaded
-        if pcTraceEnabled && (frameCount == 48 || frameCount == 170) { pcTraceBuffer.removeAll() }
-
         var cycles = 0
         let target = MSXMachine.cyclesPerFrame
-
-        #if DEBUG
-        // PC histogram: sample every 100 instructions during gameplay frames
-        var stepCount = 0
-        #endif
 
         while cycles < target {
             // Check VDP IRQ
@@ -1317,11 +531,6 @@ final class MSXMachine {
                     cycles += irqCycles
                     continue
                 }
-            }
-
-            // Capture PC trace for diagnosis
-            if pcTraceEnabled && pcTraceBuffer.count < pcTraceMaxSize {
-                pcTraceBuffer.append(cpu.PC)
             }
 
             // ── Disk BIOS PC hooks ──
@@ -1363,59 +572,8 @@ final class MSXMachine {
                 }
             }
 
-            // Detect when PC first reaches cartridge INIT address
-            if !initAddressHitLogged && memory.megaROMInitAddress != 0 && cpu.PC == memory.megaROMInitAddress {
-                initAddressHitLogged = true
-                // Read MSXVER through slot mapping (correct) not raw RAM
-                let msxVer = memory.read(0x002D)
-                print(String(format: "[INIT HIT] PC reached INIT=%04X at frame=%d SP=%04X SLOT=%02X banks=[%d,%d,%d,%d] MSXVER=%d",
-                             memory.megaROMInitAddress, frameCount, cpu.SP, memory.primarySlotReg,
-                             memory.megaROMBanks[0], memory.megaROMBanks[1],
-                             memory.megaROMBanks[2], memory.megaROMBanks[3],
-                             msxVer))
-                // Dump first 32 bytes of code at INIT address (read via slot mapping)
-                var initBytes = [String]()
-                for i in 0..<32 {
-                    let addr = UInt16(truncatingIfNeeded: Int(memory.megaROMInitAddress) + i)
-                    initBytes.append(String(format: "%02X", memory.read(addr)))
-                }
-                print(String(format: "[INIT HIT] code@%04X: %@",
-                             memory.megaROMInitAddress, initBytes.joined(separator: " ")))
-            }
-
             let c = cpu.step()
             cycles += c
-
-            // SP tracking: detect when SP enters cartridge area (0x8000-0xBFFF)
-            // This causes stack operations (PUSH/CALL) to trigger mapper bank switches
-            if memory.megaROMData != nil && !spInCartAreaLogged {
-                let sp = cpu.SP
-                if sp >= 0x8000 && sp < 0xC000 {
-                    let page2Slot = (memory.primarySlotReg >> 4) & 0x03
-                    if Int(page2Slot) == memory.megaROMSlot {
-                        spInCartAreaLogged = true
-                        print(String(format: "[SP ALERT] SP=%04X entered cart area! PC=%04X frame=%d SLOT=%02X banks=[%d,%d,%d,%d]",
-                                     sp, cpu.PC, frameCount, memory.primarySlotReg,
-                                     memory.megaROMBanks[0], memory.megaROMBanks[1],
-                                     memory.megaROMBanks[2], memory.megaROMBanks[3]))
-                        // Dump stack contents (16 bytes from SP upward)
-                        var stackBytes = [String]()
-                        for i in 0..<16 {
-                            let addr = UInt16(truncatingIfNeeded: Int(sp) + i)
-                            stackBytes.append(String(format: "%02X", memory.read(addr)))
-                        }
-                        print(String(format: "[SP ALERT] stack@%04X: %@", sp, stackBytes.joined(separator: " ")))
-                    }
-                }
-            }
-
-            #if DEBUG
-            stepCount += 1
-            if frameCount >= 800 && frameCount <= 810 && stepCount % 64 == 0 {
-                let pc = cpu.PC
-                pcHistogram[pc, default: 0] += 1
-            }
-            #endif
 
             // Update scanline
             let line = (cycles * MSXMachine.linesPerFrame) / target

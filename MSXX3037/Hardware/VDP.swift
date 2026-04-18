@@ -28,16 +28,6 @@ final class VDP {
     // Sprite collision persistence
     var spriteCollisionLatched: Bool = false
 
-    // Diagnostics (one-shot, reset by MSXMachine.reset)
-    var debugRenderGFX2 = true
-    var debugPixelCount = true
-    var debugSpriteSAT = true
-    var debugRenderGFX4 = true
-
-    // Sprite render diagnostics
-    var spriteRenderCount = 0       // frames where sprites were actually drawn
-    var lastSpritePixelCount = 0    // pixels drawn in last sprite render
-
     // Line counter
     var currentLine: Int = 0
 
@@ -59,12 +49,6 @@ final class VDP {
     // Used to distinguish NSTWRT pattern (R#14 write → address setup) from
     // MSX1 SETWRT pattern (address setup only, stale R#14).
     var r14JustWritten = false
-
-    // Debug: direct VRAM write tracking
-    var directWriteCountPage0 = 0   // writes to page 0 (0x00000-0x07FFF)
-    var directWriteCountPage1 = 0   // writes to page 1 (0x08000-0x0FFFF)
-    var directReadCountPage0 = 0
-    var directReadCountPage1 = 0
 
     // Backward compat alias
     var statusReg: UInt8 {
@@ -306,22 +290,7 @@ final class VDP {
 
     /// V9938 register write with side effects
     private func writeRegister(_ reg: Int, _ value: UInt8) {
-        let oldValue = regs[reg]
         regs[reg] = value
-
-        // Log V9938 mode changes
-        if reg == 0 && (value & 0x0C) != (oldValue & 0x0C) {
-            print(String(format: "[VDP] R#0 mode change: %02X → %02X (M5=%d M4=%d)", oldValue, value, (value >> 3) & 1, (value >> 2) & 1))
-        }
-
-        // Track R#2 (display page) changes during gameplay
-        if reg == 2 && value != oldValue {
-            let oldPage = (oldValue >> 5) & 0x03
-            let newPage = (value >> 5) & 0x03
-            if oldPage != newPage {
-                print(String(format: "[VDP] R#2 page change: %02X → %02X (displayPage %d → %d)", oldValue, value, oldPage, newPage))
-            }
-        }
 
         switch reg {
         case 14:
@@ -359,8 +328,6 @@ final class VDP {
 
         let addr = fullAddress
         vram[addr] = value
-        if addr < 0x08000 { directWriteCountPage0 += 1 }
-        else if addr < 0x10000 { directWriteCountPage1 += 1 }
         incrementAddress()
     }
 
@@ -376,8 +343,6 @@ final class VDP {
         let addr = fullAddress
         let result = readBuffer
         readBuffer = vram[addr]
-        if addr < 0x08000 { directReadCountPage0 += 1 }
-        else if addr < 0x10000 { directReadCountPage1 += 1 }
         incrementAddress()
         return result
     }
@@ -456,20 +421,10 @@ final class VDP {
     }
 
     // MARK: - Indirect Register Port Write (0x9B)
-    var debugIndirectCmdRegs = true  // One-shot: log first indirect write to R#32-R#46
-    var indirectWriteCount = 0       // Total indirect register writes
-
     func writeIndirectRegister(_ value: UInt8) {
         latchState = 0
         let regPtr = Int(regs[17] & 0x3F)
         let autoInc = (regs[17] & 0x80) == 0
-        indirectWriteCount += 1
-
-        if debugIndirectCmdRegs && regPtr >= 32 && regPtr <= 46 {
-            debugIndirectCmdRegs = false
-            print(String(format: "[VDP] First indirect write to R#%d = 0x%02X (R17=0x%02X autoInc=%@)",
-                regPtr, value, regs[17], autoInc ? "YES" : "NO"))
-        }
 
         if regPtr < regs.count && regPtr != 17 {
             writeRegister(regPtr, value)
@@ -620,20 +575,6 @@ final class VDP {
         let colBase = colorTableBase & 0x2000
         let rows = lines / 8
 
-        if debugRenderGFX2 {
-            let firstChar = Int(vram[nameBase & (VDP.vramSize - 1)])
-            if firstChar != 0 {
-                debugRenderGFX2 = false
-                let cc = firstChar
-                let patAddr = (patBase + cc * 8) & (VDP.vramSize - 1)
-                let colAddr = (colBase + cc * 8) & (VDP.vramSize - 1)
-                let patStr = (0..<8).map { String(format: "%02X", vram[(patAddr + $0) & (VDP.vramSize - 1)]) }.joined(separator: " ")
-                let colStr = (0..<8).map { String(format: "%02X", vram[(colAddr + $0) & (VDP.vramSize - 1)]) }.joined(separator: " ")
-                print(String(format: "[GFX2] name[0,0]=0x%02X  patBase=%04X: %@  colBase=%04X: %@",
-                    firstChar, patAddr, patStr, colAddr, colStr))
-            }
-        }
-
         for row in 0..<rows {
             let third = row / 8
             for col in 0..<32 {
@@ -655,12 +596,6 @@ final class VDP {
             }
         }
 
-        if debugPixelCount {
-            debugPixelCount = false
-            let black: UInt32 = 0x000000FF
-            let nonBlack = pixels.prefix(192 * VDP.screenWidth).filter { $0 != black }.count
-            print(String(format: "[GFX2 render] nonBlack=%d/%d", nonBlack, 192 * VDP.screenWidth))
-        }
     }
 
     // MARK: - Text Mode (SCREEN 0: 40x24)
@@ -735,29 +670,6 @@ final class VDP {
         // Page offset from R#2 bits 6-5 (page 0-3)
         let page = (Int(regs[2]) >> 5) & 0x03
         let pageOffset = page * 0x08000
-
-        if debugRenderGFX4 {
-            debugRenderGFX4 = false
-            let regStr = (0..<12).map { String(format: "R%d=%02X", $0, regs[$0]) }.joined(separator: " ")
-            let r14Str = String(format: "R14=%02X", regs[14])
-            print("[GFX4] SCREEN 5 render: \(regStr) \(r14Str) page=\(page) pageOff=\(String(format: "%05X", pageOffset)) lines=\(lines)")
-            // VRAM first line (128 bytes at pageOffset)
-            let line0 = (0..<32).map { String(format: "%02X", vram[(pageOffset + $0) & (VDP.vramSize - 1)]) }.joined(separator: " ")
-            print("[GFX4] VRAM[\(String(format: "%05X", pageOffset))]: \(line0)")
-            // VRAM line 100 (middle area)
-            let mid = pageOffset + 100 * 128
-            let lineMid = (0..<32).map { String(format: "%02X", vram[(mid + $0) & (VDP.vramSize - 1)]) }.joined(separator: " ")
-            print("[GFX4] VRAM[\(String(format: "%05X", mid))]: \(lineMid)")
-            // Count non-zero bytes in bitmap area
-            var nonZero = 0
-            for i in 0..<(lines * 128) {
-                if vram[(pageOffset + i) & (VDP.vramSize - 1)] != 0 { nonZero += 1 }
-            }
-            print("[GFX4] nonZero bytes in bitmap: \(nonZero)/\(lines * 128)")
-            // Palette
-            let palStr = (0..<16).map { String(format: "%08X", palette[$0]) }.joined(separator: " ")
-            print("[GFX4] palette: \(palStr)")
-        }
 
         // R#23: vertical scroll offset (V9938 feature)
         // Display line `y` shows VRAM line `(y + R#23) % 256` from the current page
@@ -863,32 +775,6 @@ final class VDP {
         // 212ライン時のターミネータ値
         let terminator: Int = (lines > 192) ? 0xD8 : 0xD0
 
-        if debugSpriteSAT {
-            debugSpriteSAT = false
-            print(String(format: "[SAT] attrBase=%05X patBase=%05X size=%d mag=%d mode2=%d colorTbl=%05X",
-                attrBase, patBase, size, mag, isSpriteMode2 ? 1 : 0, colorTableBase))
-            for i in 0..<8 {
-                let a = attrBase + i * 4
-                let sy = Int(vram[a & (VDP.vramSize - 1)])
-                if sy == terminator {
-                    print(String(format: "[SAT] sprite %d: TERMINATOR (0x%02X)", i, terminator)); break
-                }
-                let sx = Int(vram[(a+1) & (VDP.vramSize - 1)])
-                let sn = Int(vram[(a+2) & (VDP.vramSize - 1)])
-                let sc = Int(vram[(a+3) & (VDP.vramSize - 1)])
-                if isSpriteMode2 {
-                    // Mode 2: カラーテーブルの先頭バイトも表示
-                    let ct = colorTableBase + i * 16
-                    let c0 = vram[ct & (VDP.vramSize - 1)]
-                    print(String(format: "[SAT] sprite %d: y=%3d x=%3d name=%3d attr=%02X ct0=%02X",
-                        i, sy, sx, sn, sc, c0))
-                } else {
-                    print(String(format: "[SAT] sprite %d: y=%3d x=%3d name=%3d color=%d",
-                        i, sy, sx, sn, sc & 0x0F))
-                }
-            }
-        }
-
         var collisionDetected = false
         // Sprite Mode 2 CC=1 (カラー合成): 色インデックスを論理 OR で合成し、
         // 最後にパレット変換する。CC=0 のスプライトは通常の「先着優先」で描画。
@@ -981,8 +867,6 @@ final class VDP {
             }
         }
 
-        lastSpritePixelCount = spriteColorIdx.count
-        if !spriteColorIdx.isEmpty { spriteRenderCount += 1 }
         // 蓄積した色インデックスをパレット経由で RGBA に変換して描画
         for (idx, colorIdx) in spriteColorIdx {
             pixels[idx] = palette[colorIdx & 0x0F]

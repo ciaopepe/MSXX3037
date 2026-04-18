@@ -68,7 +68,6 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
             desc.fragmentFunction = frag
             desc.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
-            print("[Metal] Pipeline created OK. pixelFormat=\(mtkView.colorPixelFormat.rawValue)")
         } catch {
             print("[Metal] ERROR: pipeline setup failed: \(error)")
         }
@@ -83,7 +82,6 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
         desc.storageMode = .shared
         desc.usage = [.shaderRead]
         texture = device.makeTexture(descriptor: desc)
-        print("[Metal] texture: \(texture != nil ? "OK \(VDP.screenWidth)x\(VDP.screenHeight)" : "nil")")
     }
 
     private func setupVertices() {
@@ -118,7 +116,6 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
-    private var drawCallCount = 0
     func draw(in view: MTKView) {
         // アキュムレータ方式: 端数フレームも正確に処理
         frameAccumulator += speedMultiplier
@@ -128,22 +125,11 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
             machine.runFrame()
         }
 
-        drawCallCount += 1
-        if drawCallCount == 1 || drawCallCount % 300 == 0 {
-            let cx = VDP.screenWidth / 2, cy = VDP.screenHeight / 2
-            let pix = machine.screenPixels[cy * VDP.screenWidth + cx]
-            print(String(format: "[draw#%d] pix[center]=0x%08X  drawableSize=%.0fx%.0f  speed=%.2fx",
-                drawCallCount, pix,
-                view.drawableSize.width, view.drawableSize.height,
-                speedMultiplier))
-        }
-
         guard let drawable = view.currentDrawable,
               let desc = view.currentRenderPassDescriptor,
               let cmd = commandQueue.makeCommandBuffer(),
               let enc = cmd.makeRenderCommandEncoder(descriptor: desc) else {
-            print(String(format: "[draw#%d] GUARD FAILED pip=%@ tex=%@ vb=%@ drawable=%@ desc=%@",
-                drawCallCount,
+            print(String(format: "[draw] GUARD FAILED pip=%@ tex=%@ vb=%@ drawable=%@ desc=%@",
                 pipeline     != nil ? "OK" : "nil",
                 texture      != nil ? "OK" : "nil",
                 vertexBuffer != nil ? "OK" : "nil",
@@ -179,7 +165,6 @@ struct MetalView: UIViewRepresentable {
         view.isOpaque = false
         let r = MSXRenderer(mtkView: view, machine: machine)
         DispatchQueue.main.async { renderer = r }
-        print("[MetalView] makeUIView: device=\(view.device != nil ? "OK" : "nil")")
         return view
     }
 
@@ -424,6 +409,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showingBIOSPicker = false
     @State private var gamepadExpanded = false
+    @ObservedObject private var store: StoreKitManager = .shared
 
     var body: some View {
         NavigationStack {
@@ -485,10 +471,21 @@ struct SettingsView: View {
                 // ゲームパッド設定（折りたたみ可能）
                 Section {
                     DisclosureGroup(isExpanded: $gamepadExpanded) {
-                        // キーセット選択
+                        // キーセット選択（Premium 未購入は setA のみ）
                         Picker("Pad Type", selection: $config.keySet) {
                             ForEach(GamepadKeySet.allCases, id: \.self) { set in
-                                Text(set.label).tag(set)
+                                if set == .setA || store.isPremium {
+                                    Text(set.label).tag(set)
+                                }
+                            }
+                        }
+                        if !store.isPremium {
+                            NavigationLink {
+                                PremiumUnlockView()
+                            } label: {
+                                Label("Gamepad B / C / D は Premium で解放", systemImage: "lock.fill")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
 
@@ -533,6 +530,21 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .listRowBackground(Color.clear)
+
+                    NavigationLink {
+                        PremiumUnlockView()
+                    } label: {
+                        HStack {
+                            Label("Premium Unlock", systemImage: store.isPremium ? "checkmark.seal.fill" : "lock.open.fill")
+                                .foregroundColor(store.isPremium ? .green : .primary)
+                            Spacer()
+                            if store.isPremium {
+                                Text("Unlocked")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
+                        }
+                    }
 
                     NavigationLink {
                         AboutView()
@@ -626,6 +638,17 @@ struct EmulatorView: View {
             Button("OK") {}
         } message: {
             Text(viewModel.errorMessage)
+        }
+        .sheet(isPresented: $viewModel.showPremiumSheet) {
+            NavigationStack {
+                PremiumUnlockView()
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("閉じる") { viewModel.showPremiumSheet = false }
+                        }
+                    }
+            }
+            .presentationDetents([.large])
         }
     }
 
@@ -853,6 +876,7 @@ struct EmulatorView: View {
 
     private func saveLoadSlot(slot: Int) -> some View {
         let hasData = viewModel.machine.hasSaveData(slot: slot)
+        let isPremium = StoreKitManager.shared.isPremium
         let dateStr: String = {
             guard let d = viewModel.machine.saveDate(slot: slot) else { return "Empty" }
             let f = DateFormatter()
@@ -865,35 +889,49 @@ struct EmulatorView: View {
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                 .foregroundColor(.cyan)
 
-            Text(dateStr)
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundColor(.white.opacity(0.5))
-                .lineLimit(1)
+            if !isPremium {
+                Image(systemName: "lock.fill")
+                    .foregroundColor(.yellow.opacity(0.8))
+                    .font(.system(size: 14))
+            } else {
+                Text(dateStr)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.5))
+                    .lineLimit(1)
+            }
 
             // セーブボタン
             Button {
-                viewModel.saveToSlot(slot)
+                if isPremium {
+                    viewModel.saveToSlot(slot)
+                } else {
+                    viewModel.showPremiumRequired()
+                }
             } label: {
-                Label("SAVE", systemImage: "square.and.arrow.down")
+                Label("SAVE", systemImage: isPremium ? "square.and.arrow.down" : "lock.fill")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundColor(.white)
                     .frame(width: 80, height: 32)
-                    .background(Color.green.opacity(0.6))
+                    .background(isPremium ? Color.green.opacity(0.6) : Color.gray.opacity(0.4))
                     .cornerRadius(8)
             }
 
             // ロードボタン
             Button {
-                viewModel.loadFromSlot(slot)
+                if isPremium {
+                    viewModel.loadFromSlot(slot)
+                } else {
+                    viewModel.showPremiumRequired()
+                }
             } label: {
-                Label("LOAD", systemImage: "square.and.arrow.up")
+                Label("LOAD", systemImage: isPremium ? "square.and.arrow.up" : "lock.fill")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundColor(.white)
                     .frame(width: 80, height: 32)
-                    .background(hasData ? Color.blue.opacity(0.6) : Color.gray.opacity(0.3))
+                    .background(isPremium && hasData ? Color.blue.opacity(0.6) : Color.gray.opacity(0.3))
                     .cornerRadius(8)
             }
-            .disabled(!hasData)
+            .disabled(isPremium && !hasData)
         }
     }
 
@@ -1008,6 +1046,7 @@ final class EmulatorViewModel: ObservableObject {
 
     /// セーブ/ロード操作のフィードバック用
     @Published var saveLoadMessage: String? = nil
+    @Published var showPremiumSheet = false
 
     func togglePause() {
         isRunning.toggle()
@@ -1112,6 +1151,12 @@ final class EmulatorViewModel: ObservableObject {
                 isRunning = true
                 machine.start()
             } else {
+                // Premium 未購入の場合、2本目の ROM 読み込みをブロック
+                if loadedCartridge && !StoreKitManager.shared.isPremium {
+                    showPremiumRequired()
+                    return
+                }
+
                 let name = url.deletingPathExtension().lastPathComponent
                 machine.cartridgeName = name
 
@@ -1197,6 +1242,10 @@ final class EmulatorViewModel: ObservableObject {
     private func showError(message: String) {
         errorMessage = message
         showError    = true
+    }
+
+    func showPremiumRequired() {
+        showPremiumSheet = true
     }
 }
 

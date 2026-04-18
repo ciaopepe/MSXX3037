@@ -11,23 +11,6 @@ final class VDPCommandEngine {
     var readReady = false       // VRAM→CPU read pending (LMCM)
     var commandRunning = false
 
-    // Debug: command execution counters
-    var cmdCounts = [Int](repeating: 0, count: 16)
-    var debugFirstCmd = true  // One-shot: print first non-STOP command
-    var hmmmPlayArea = 0     // HMMM targeting DY < 192
-    var hmmmStatusBar = 0    // HMMM targeting DY >= 192
-    var lmmmPlayArea = 0     // LMMM targeting DY < 192
-
-    // Debug: command log ring buffer (last 30 commands)
-    struct CmdLogEntry {
-        let cmd: UInt8
-        let cmdReg: UInt8
-        let sx, sy, dx, dy, nx, ny: Int
-        let clr, arg: UInt8
-    }
-    var cmdLog = [CmdLogEntry]()
-    let cmdLogMax = 60
-
     // Current command parameters (from R#32-R#45)
     private var SX = 0, SY = 0
     private var DX = 0, DY = 0
@@ -98,22 +81,6 @@ final class VDPCommandEngine {
         commandRunning = false
 
         loadParams()
-        cmdCounts[Int(cmd)] += 1
-
-        // Log command to ring buffer
-        if cmd != 0 {
-            let entry = CmdLogEntry(cmd: cmd, cmdReg: cmdReg, sx: SX, sy: SY, dx: DX, dy: DY, nx: NX, ny: NY, clr: CLR, arg: ARG)
-            if cmdLog.count >= cmdLogMax { cmdLog.removeFirst() }
-            cmdLog.append(entry)
-        }
-
-        if debugFirstCmd && cmd != 0 {
-            debugFirstCmd = false
-            let cmdNames = ["STOP","?1","?2","?3","POINT","PSET","SRCH","LINE",
-                            "LMMV","LMMM","LMCM","LMMC","HMMV","HMMM","YMMM","HMMC"]
-            print(String(format: "[VDP CMD] First command: %@ (0x%X) cmdReg=%02X SX=%d SY=%d DX=%d DY=%d NX=%d NY=%d CLR=%02X ARG=%02X",
-                cmdNames[Int(cmd)], cmd, cmdReg, SX, SY, DX, DY, NX, NY, CLR, ARG))
-        }
 
         // NX=0/NY=0 → max: V9938 仕様では矩形コマンドのみ NX=0 を最大値として扱う。
         // LINE コマンドでは NX=描画ドット数, NY=誤差項なので 0 はそのまま 0。
@@ -145,7 +112,6 @@ final class VDPCommandEngine {
         case 0x8: // LMMV (logical fill)
             execLMMV()
         case 0x9: // LMMM (logical copy VRAM→VRAM)
-            if DY < 192 { lmmmPlayArea += 1 }
             execLMMM()
         case 0xA: // LMCM (logical copy VRAM→CPU)
             startLMCM()
@@ -154,7 +120,6 @@ final class VDPCommandEngine {
         case 0xC: // HMMV (high-speed fill)
             execHMMV()
         case 0xD: // HMMM (high-speed copy VRAM→VRAM)
-            if DY < 192 { hmmmPlayArea += 1 } else { hmmmStatusBar += 1 }
             execHMMM()
         case 0xE: // YMMM (Y-only move)
             execYMMM()
@@ -342,7 +307,6 @@ final class VDPCommandEngine {
     }
 
     // MARK: - LINE: Draw line (Bresenham)
-    var debugLineCmd = true  // One-shot: log first LINE command
     private func execLine() {
         guard NX > 0 else { return }  // NX=0 → no dots to draw
 
@@ -354,12 +318,6 @@ final class VDPCommandEngine {
         let shortSide = NY  // "number of dots" along minor axis (used as error term init)
         var dx = DX, dy = DY
         var err = 0
-
-        if debugLineCmd {
-            debugLineCmd = false
-            print(String(format: "[LINE] DX=%d DY=%d NX=%d NY=%d CLR=%02X ARG=%02X MAJ=%d DIX=%d DIY=%d op=%02X",
-                         DX, DY, NX, NY, CLR, ARG, maj ? 1 : 0, dix, diy, cmdByte & 0x0F))
-        }
 
         for _ in 0..<longSide {
             let dst = vdp.readPixel(x: dx & (maxNX - 1), y: dy & 0x3FF)

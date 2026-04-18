@@ -433,7 +433,6 @@ enum AlphaBIOS {
         // V9938 パッチ (Patch 10) で SCREEN 5 をサポートするため整合性がある。
         if rom[0x002D] == 0x00 {
             rom[0x002D] = 0x01  // MSX2
-            print("[Patch 11b] MSXVER set to 1 (MSX2)")
         }
 
         // ── Patch 6: LINL32 デフォルト値修正 (32 → 29) ──
@@ -519,7 +518,6 @@ enum AlphaBIOS {
                 0xC3, 0x00, 0x02,           // JP 0x0200        ; original dispatcher
             ]
             writeBytes(&rom, at: 0x3F30, bytes: chgmodPatch)
-            print("[Patch 10] CHGMOD V9938 patch applied at 0x02AD → JP 0x3F30")
         } else {
             print(String(format: "[Patch 10] CHGMOD bytes mismatch: %02X %02X %02X (expected FE 04 D0)",
                          rom[0x02AD], rom[0x02AE], rom[0x02AF]))
@@ -569,7 +567,6 @@ enum AlphaBIOS {
         writeJP(&rom, at: 0x0171, to: 0x3F70)  // NSTWRT
         writeJP(&rom, at: 0x0174, to: 0x3F9E)  // NRDVRM
         writeJP(&rom, at: 0x0177, to: 0x3FA4)  // NWRVRM
-        print("[Patch 12] 17bit VRAM stubs applied at 0x3F70-0x3FBA (DI/EI protected)")
 
         // ── Patch 13: SETWRT/SETRD に R#14=0 リセットラッパー追加 ──
         // MSX2 ゲームが NSTWRT 等で R#14 を変更した後、C-BIOS の MSX1 版
@@ -604,7 +601,6 @@ enum AlphaBIOS {
             ]
             writeBytes(&rom, at: 0x3FC0, bytes: setrdWrapper)
             writeJP(&rom, at: 0x0050, to: 0x3FC0)
-            print("[Patch 13] SETRD R#14 reset wrapper at 0x3FC0 → orig 0x\(String(format: "%04X", Int(origHi) << 8 | Int(origLo)))")
         }
 
         // SETWRT (0x0053) ラッパー
@@ -621,7 +617,6 @@ enum AlphaBIOS {
             ]
             writeBytes(&rom, at: 0x3FCC, bytes: setwrtWrapper)
             writeJP(&rom, at: 0x0053, to: 0x3FCC)
-            print("[Patch 13] SETWRT R#14 reset wrapper at 0x3FCC → orig 0x\(String(format: "%04X", Int(origHi) << 8 | Int(origLo)))")
         }
     }
 

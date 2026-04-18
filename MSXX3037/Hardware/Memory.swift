@@ -68,13 +68,7 @@ final class MSXMemory {
     var megaROMOffsetMask: Int = 0x1FFF
     /// Slot number that holds the MegaROM cartridge
     var megaROMSlot: Int = -1
-    /// Debug: bank switch counter
-    var bankSwitchCount = 0
-
-    /// INIT entry-point address from the cartridge header (for diagnostics).
-    var megaROMInitAddress: UInt16 = 0
-
-    /// Clear MegaROM state (called when loading a non-MegaROM cartridge or resetting).
+/// Clear MegaROM state (called when loading a non-MegaROM cartridge or resetting).
     func clearMegaROM() {
         megaROMData = nil
         megaROMMapper = .none
@@ -83,8 +77,6 @@ final class MSXMemory {
         megaROMBankShift = 13
         megaROMOffsetMask = 0x1FFF
         megaROMSlot = -1
-        bankSwitchCount = 0
-        megaROMInitAddress = 0
     }
 
     // MARK: - Load cartridge
@@ -110,19 +102,11 @@ final class MSXMemory {
             megaROMOffsetMask = isAscii16 ? 0x3FFF : 0x1FFF
             updateBankPtrs()
 
-            // Store INIT address from cartridge header (for diagnostics).
-            if data.count >= 4 && data[0] == 0x41 && data[1] == 0x42 {
-                let initAddr = UInt16(data[2]) | (UInt16(data[3]) << 8)
-                if initAddr >= 0x4000 && initAddr < 0xC000 {
-                    megaROMInitAddress = initAddr
-                }
-            }
-
             // Fill initial slot view (first 32KB at 0x4000-0xBFFF)
             let bankSize = (megaROMMapper == .ascii16) ? 0x4000 : 0x2000
             rebuildMegaROMView(&cartData, bankSize: bankSize)
-            print(String(format: "[Cart] MegaROM %dKB mapper=%@ slot=%d INIT=%04X",
-                         data.count / 1024, "\(megaROMMapper)", slot, megaROMInitAddress))
+            print(String(format: "[Cart] MegaROM %dKB mapper=%@ slot=%d",
+                         data.count / 1024, "\(megaROMMapper)", slot))
         } else if data.count <= 0x8000 {
             // ≤ 32KB: load at 0x4000
             let offset = 0x4000
@@ -427,16 +411,8 @@ final class MSXMemory {
             break
         }
 
-        // Update bank pointers and log switches
         if megaROMBanks != oldBanks {
             updateBankPtrs()
-            bankSwitchCount += 1
-            if bankSwitchCount <= 50 {
-                print(String(format: "[BANK #%d] addr=%04X val=%d banks=[%d,%d,%d,%d] slot=%02X PC=%04X",
-                             bankSwitchCount, a, bank,
-                             megaROMBanks[0], megaROMBanks[1], megaROMBanks[2], megaROMBanks[3],
-                             primarySlotReg, pc))
-            }
         }
     }
 }
