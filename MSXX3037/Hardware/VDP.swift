@@ -28,6 +28,14 @@ final class VDP {
     // Sprite collision persistence
     var spriteCollisionLatched: Bool = false
 
+    // Sprite rendering scratch buffers — reused every frame to avoid heap allocation.
+    // spriteBuf: accumulated color index per pixel (0 = empty)
+    // touchBuf:  CC=0 collision marker per pixel (0 = untouched, 1 = touched)
+    // dirtyList: indices written this frame — cleared at start of next frame
+    private var spriteBuf = [UInt8](repeating: 0, count: VDP.screenWidth * VDP.screenHeight)
+    private var touchBuf  = [UInt8](repeating: 0, count: VDP.screenWidth * VDP.screenHeight)
+    private var dirtyList = [Int]()
+
     // Line counter
     var currentLine: Int = 0
 
@@ -755,6 +763,10 @@ final class VDP {
         // V9938 R#8 bit 1: SPD (Sprite Disable) — skip all sprite processing
         if regs[8] & 0x02 != 0 { return }
 
+        // Clear only pixels written last frame — O(written) instead of O(screen)
+        for i in dirtyList { spriteBuf[i] = 0; touchBuf[i] = 0 }
+        dirtyList.removeAll(keepingCapacity: true)
+
         let attrBase = spriteAttrBase
         let patBase = spritePatBase
         let size = spriteSize
@@ -776,12 +788,6 @@ final class VDP {
         let terminator: Int = (lines > 192) ? 0xD8 : 0xD0
 
         var collisionDetected = false
-        // Sprite Mode 2 CC=1 (カラー合成): 色インデックスを論理 OR で合成し、
-        // 最後にパレット変換する。CC=0 のスプライトは通常の「先着優先」で描画。
-        // openMSX 準拠: バッファ（spriteColorIdx）が非 nil なら CC=0 は描画スキップ。
-        // CC=1 は常に OR。CC=0 は直接書き込み（OR しない）。
-        var spriteColorIdx = [Int: Int]()  // pixel index → accumulated color index
-        var touchedPixels  = Set<Int>()    // 衝突検出用
 
         for i in 0..<32 {
             let attrAddr = attrBase + i * 4
@@ -837,29 +843,30 @@ final class VDP {
                     let patByte = vram[patIdx & (VDP.vramSize - 1)]
                     let bit = (patByte >> (7 - (patX & 7))) & 1
 
-                    if bit != 0 {
+                    if bit != 0 && lineColor != 0 {
                         let idx = pixY * VDP.screenWidth + pixX
 
                         if lineCC {
-                            // CC=1: 色インデックスを OR 合成（衝突検出なし、ピクセル占有なし）
-                            // V9938 仕様: CC=1 のスプライトは既存の色と論理 OR で合成される
-                            if lineColor != 0 {
-                                spriteColorIdx[idx] = (spriteColorIdx[idx] ?? 0) | lineColor
+                            // CC=1: 色インデックスを OR 合成（衝突検出なし）
+                            // 初回書き込み時のみ dirtyList に追加
+                            if spriteBuf[idx] == 0 && touchBuf[idx] == 0 {
+                                dirtyList.append(idx)
                             }
+                            spriteBuf[idx] |= UInt8(lineColor)
                         } else {
-                            // CC=0: 通常描画（先着優先 + 衝突検出）
-                            // 衝突検出: CC=0 の非透明ピクセル同士の重なりで発生
-                            if lineColor != 0 {
-                                if touchedPixels.contains(idx) {
-                                    collisionDetected = true
-                                } else {
-                                    touchedPixels.insert(idx)
-                                }
+                            // CC=0: 先着優先描画 + 衝突検出
+                            if touchBuf[idx] != 0 {
+                                // 既に CC=0 スプライトが触れたピクセル → 衝突
+                                collisionDetected = true
+                            } else {
+                                // 初回タッチ: dirtyList への追加 + touchBuf マーク
+                                if spriteBuf[idx] == 0 { dirtyList.append(idx) }
+                                touchBuf[idx] = 1
                             }
-                            // 描画: バッファが空の場合のみ直接書き込み（OR しない）
-                            // CC=1 スプライトが既に書き込んだピクセルには CC=0 は上書きしない
-                            if lineColor != 0 && spriteColorIdx[idx] == nil {
-                                spriteColorIdx[idx] = lineColor
+                            // 先着優先: spriteBuf が空の場合のみ書き込み
+                            // （CC=1 が既に書き込んだピクセルには上書きしない）
+                            if spriteBuf[idx] == 0 {
+                                spriteBuf[idx] = UInt8(lineColor)
                             }
                         }
                     }
@@ -868,8 +875,8 @@ final class VDP {
         }
 
         // 蓄積した色インデックスをパレット経由で RGBA に変換して描画
-        for (idx, colorIdx) in spriteColorIdx {
-            pixels[idx] = palette[colorIdx & 0x0F]
+        for idx in dirtyList {
+            pixels[idx] = palette[Int(spriteBuf[idx]) & 0x0F]
         }
 
         spriteCollisionLatched = collisionDetected
