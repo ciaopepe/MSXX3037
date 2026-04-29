@@ -560,8 +560,11 @@ final class VDP {
                 let nameIdx = nameBase + row * 32 + col
                 let charCode = Int(vram[nameIdx & (VDP.vramSize - 1)])
                 let colorEntry = vram[(colBase + (charCode >> 3)) & (VDP.vramSize - 1)]
-                let fg = palette[Int(colorEntry >> 4)]
-                let bg2 = colorEntry & 0xF == 0 ? bg : palette[Int(colorEntry & 0xF)]
+                // FG/BG とも color 0 は transparent = backdrop として描画する
+                let fgIdx = Int(colorEntry >> 4)
+                let bgIdx = Int(colorEntry & 0xF)
+                let fg = fgIdx == 0 ? bg : palette[fgIdx]
+                let bg2 = bgIdx == 0 ? bg : palette[bgIdx]
 
                 for line in 0..<8 {
                     let patByte = vram[(patBase + charCode * 8 + line) & (VDP.vramSize - 1)]
@@ -579,8 +582,15 @@ final class VDP {
     // MARK: - Graphics Mode II (SCREEN 2 & 4: 32x24 bitmap)
     private func renderGraphicsII(into pixels: inout [UInt32], bg: UInt32, lines: Int) {
         let nameBase = nameTableBase
-        let patBase = patternTableBase & 0x2000
-        let colBase = colorTableBase & 0x2000
+        // SCREEN 2 における正規のベース／マスク計算
+        //   R4 bit2     = pattern table base (0x0000 / 0x2000)
+        //   R4 bits0-1  = pattern table mask (アドレスビット 11-12 のマスク)
+        //   R3 bit7     = color   table base (0x0000 / 0x2000)
+        //   R3 bits0-6  = color   table mask (アドレスビット 6-12 のマスク)
+        let patBase = (Int(regs[4]) & 0x04) << 11
+        let colBase = (Int(regs[3]) & 0x80) << 6
+        let patMask = (Int(regs[4] & 0x03) << 11) | 0x07FF
+        let colMask = (Int(regs[3] & 0x7F) << 6) | 0x003F
         let rows = lines / 8
 
         for row in 0..<rows {
@@ -590,10 +600,14 @@ final class VDP {
                 let charCode = Int(vram[nameIdx & (VDP.vramSize - 1)]) + third * 256
 
                 for line in 0..<8 {
-                    let patByte = vram[(patBase + charCode * 8 + line) & (VDP.vramSize - 1)]
-                    let colorEntry = vram[(colBase + charCode * 8 + line) & (VDP.vramSize - 1)]
-                    let fg = palette[Int(colorEntry >> 4)]
-                    let bg2 = colorEntry & 0xF == 0 ? bg : palette[Int(colorEntry & 0xF)]
+                    let charLineAddr = charCode * 8 + line
+                    let patByte = vram[(patBase + (charLineAddr & patMask)) & (VDP.vramSize - 1)]
+                    let colorEntry = vram[(colBase + (charLineAddr & colMask)) & (VDP.vramSize - 1)]
+                    // FG/BG とも color 0 は transparent = backdrop（R#7 下位ニブル）として描画する
+                    let fgIdx = Int(colorEntry >> 4)
+                    let bgIdx = Int(colorEntry & 0xF)
+                    let fg = fgIdx == 0 ? bg : palette[fgIdx]
+                    let bg2 = bgIdx == 0 ? bg : palette[bgIdx]
                     let pixRow = row * 8 + line
                     let pixColBase = col * 8
                     for bit in 0..<8 {

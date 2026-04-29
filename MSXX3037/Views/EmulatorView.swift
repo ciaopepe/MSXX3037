@@ -73,33 +73,28 @@ final class MSXRenderer: NSObject, MTKViewDelegate {
             if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
                 return float4(0.0, 0.0, 0.0, 1.0);
 
-            // 2. 色収差（RGB の横ズレ）
+            // 2. 色収差（RGB の横ズレ）— 細部が滲まないよう控えめに
             constexpr sampler s(min_filter::linear, mag_filter::linear, address::clamp_to_edge);
-            float ab = 0.002;
+            float ab = 0.0008;
             float r = tex.sample(s, uv + float2(-ab, 0.0)).r;
             float g = tex.sample(s, uv).g;
             float b = tex.sample(s, uv + float2( ab, 0.0)).b;
             float4 color = float4(r, g, b, 1.0);
 
-            // 3. スキャンライン（MSX ピクセル行の境界を暗くする）
-            float scanline = abs(sin(uv.y * 212.0 * 3.14159265));
-            color.rgb *= 0.65 + 0.35 * scanline;
+            // 3. スキャンライン（MSX 縦 192 ラインに合わせ、強度を弱めて細部を残す）
+            float scanline = abs(sin(uv.y * 192.0 * 3.14159265));
+            color.rgb *= 0.85 + 0.15 * scanline;
 
             // 4. RGB フォスファマスク（スクリーン px 単位の 3 色サブピクセル）
+            //    マスク値を 0.90 に弱め、低チャンネルが過度に持ち上がらないようにする
             int col3 = int(in.pos.x) % 3;
             float3 mask;
-            if      (col3 == 0) { mask = float3(1.00, 0.75, 0.75); }
-            else if (col3 == 1) { mask = float3(0.75, 1.00, 0.75); }
-            else                { mask = float3(0.75, 0.75, 1.00); }
-            color.rgb *= mask * 1.20;   // avg 0.833 × 1.20 ≈ 1.0 で輝度補償
+            if      (col3 == 0) { mask = float3(1.00, 0.90, 0.90); }
+            else if (col3 == 1) { mask = float3(0.90, 1.00, 0.90); }
+            else                { mask = float3(0.90, 0.90, 1.00); }
+            color.rgb *= mask * 1.05;   // avg 0.933 × 1.05 ≈ 0.98 で控えめに輝度補償
 
-            // 5. ビネット（コーナー周辺減光）
-            float2 vp = (uv - 0.5) * 2.0;
-            float vig = 1.0 - smoothstep(0.65, 1.55, length(vp * float2(1.0, 1.05)));
-            color.rgb *= max(vig, 0.0);
-
-            // 6. ガンマ補正（CRT 自発光の輝き感）
-            color.rgb = pow(clamp(color.rgb, 0.001, 1.0), float3(0.85));
+            // 6. ガンマ補正は無効化（黄色など低 B 色の彩度を保つ）
 
             return color;
         }
@@ -614,7 +609,7 @@ struct SettingsView: View {
                     }
                     .tint(.cyan)
                     if crtEnabled {
-                        Text("Scanlines · Barrel distortion · Phosphor mask · Vignette")
+                        Text("Scanlines · Barrel distortion · Phosphor mask")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
