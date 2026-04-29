@@ -619,6 +619,8 @@ final class MSXMachine {
     // Row 5: Z Y X W V U T S
     // Row 6: F3 F2 F1 CODE CAP GRAPH CTRL SHIFT
     // Row 7: RET SEL BS STOP TAB ESC F5 F4
+    // Row 8: RIGHT DOWN UP LEFT DEL INS HOME SPACE
+    //        col7  col6 col5 col4 col3 col2 col1  col0
 
     static let keyMap: [String: (row: Int, col: Int)] = [
         "0": (0,0), "1": (0,1), "2": (0,2), "3": (0,3), "4": (0,4),
