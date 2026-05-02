@@ -224,8 +224,8 @@ struct MetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MTKView, context: Context) {}
 }
 
-// MARK: - AirPlay Button
-struct AirPlayButton: UIViewRepresentable {
+// MARK: - Screen Mirroring Button
+struct ScreenMirroringButton: UIViewRepresentable {
     func makeUIView(context: Context) -> AVRoutePickerView {
         let v = AVRoutePickerView()
         v.tintColor       = .white
@@ -669,7 +669,7 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    AirPlayButton()
+                    ScreenMirroringButton()
                         .frame(width: 36, height: 36)
                 }
                 ToolbarItem(placement: .topBarTrailing) {

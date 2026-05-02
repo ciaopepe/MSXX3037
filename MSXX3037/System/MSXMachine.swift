@@ -516,12 +516,23 @@ final class MSXMachine {
         // frame 165 でスプラッシュを解除すると最初のゲームフレームが確実に描画済みになる
         if cartridgeLoaded && !gameStartFired && frameCount == 165 {
             gameStartFired = true
+            // Note: Page 0 (BIOS) と Page 3 (RAM) はメモリマッピングで固定
+            // ゲームがすべてのページをカートリッジに設定してもBIOS割り込みは保護される
             let cb = onGameReady
             DispatchQueue.main.async { cb?() }
         }
 
         var cycles = 0
         let target = MSXMachine.cyclesPerFrame
+
+        // Scanline tracking via cycle accumulator (avoids per-instruction
+        // multiply+divide that the previous formula `(cycles * 262) / target`
+        // performed ~15,000 times per frame).
+        let cyclesPerLine = MSXMachine.cyclesPerLine
+        let maxLine = MSXMachine.linesPerFrame - 1
+        let vblankLine = vdp.activeLines
+        var line = -1
+        var nextLineCycle = 0
 
         while cycles < target {
             // Check VDP IRQ
@@ -573,25 +584,26 @@ final class MSXMachine {
                 }
             }
 
-            let c = cpu.step()
-            cycles += c
+            cycles += cpu.step()
 
-            // Update scanline
-            let line = (cycles * MSXMachine.linesPerFrame) / target
-            if line != vdp.currentLine {
+            // Advance scanline counter only when a line boundary is crossed.
+            // A single Z80 instruction (max ~23 cycles) can never cross more
+            // than one boundary (cyclesPerLine ≈ 227), but `while` keeps it
+            // safe in the unlikely event of a multi-line jump (e.g. via IRQ).
+            while cycles >= nextLineCycle && line < maxLine {
+                line += 1
+                nextLineCycle += cyclesPerLine
                 vdp.currentLine = line
                 // TMS9918A collision persistence: on real hardware the VDP
                 // re-detects sprite collisions on every scanline during active
                 // display (lines 0-191). KEYINT reads VDP status at VBlank,
                 // clearing the collision flag before the game's main-loop can
-                // read it via RDVDP.  Re-applying the latched collision at
+                // read it via RDVDP. Re-applying the latched collision at
                 // line 0 simulates the continuous detection so the flag is
                 // available when the game polls.
                 if line == 0 && vdp.spriteCollisionLatched {
                     vdp.statusReg |= 0x20
-                }
-                let vblankLine = vdp.activeLines
-                if line == vblankLine {
+                } else if line == vblankLine {
                     // VBlank start
                     vdp.triggerVBlank()
                     vdp.renderFrame(into: &screenPixels)

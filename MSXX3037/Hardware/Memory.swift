@@ -243,6 +243,9 @@ final class MSXMemory {
         0x5D5C4C04: .ascii16, // Romancia (J)
         0xCAC76788: .ascii16, // Gallforce (J)
         0x8C0CF5C4: .ascii16, // Super Laydock (J)
+
+        // ── Konami (additional) ──
+        0xE54B6041: .konami,  // Maiden's Extreme Fist (BunGaRua, MSXdev24)
     ]
 
     /// Look up mapper type from ROM database using CRC32.
@@ -295,20 +298,22 @@ final class MSXMemory {
     }
 
     // MARK: - Memory Read
+    @inline(__always)
     func read(_ addr: UInt16) -> UInt8 {
         let page = Int(addr >> 14)
         let slot = Int(pageSlot[page])
 
-        // MegaROM dynamic bank read (0x4000-0xBFFF)
-        if slot == megaROMSlot && megaROMData != nil && addr >= 0x4000 && addr < 0xC000 {
-            return readMegaROM(addr)
-        }
-
+        // Hot path: slot has data (BIOS / cartridge). The MegaROM check
+        // implicitly gates on `megaROMData != nil` because megaROMSlot is
+        // -1 when no MegaROM is loaded (slot is always 0..3, never -1).
         if let slotData = slots[slot] {
+            if slot == megaROMSlot && addr >= 0x4000 && addr < 0xC000 {
+                return readMegaROM(addr)
+            }
             return slotData[Int(addr)]
         }
 
-        // Slot 3 = RAM
+        // Slot 3 = RAM (slots[3] is always nil — RAM lives in `ram` array).
         if slot == 3 {
             return ram[Int(addr)]
         }
@@ -339,29 +344,30 @@ final class MSXMemory {
     }
 
     // MARK: - Memory Write
+    @inline(__always)
     func write(_ addr: UInt16, _ value: UInt8, pc: UInt16 = 0) {
+        // On MSX1 hardware, the RAM chip is always present on the write bus
+        // regardless of slot selection. Slot mapping only affects reads.
+        // This allows C-BIOS to use the stack (page 3) before configuring
+        // port 0xA8 to officially map RAM to page 3.
+        ram[Int(addr)] = value
+
         // MegaROM bank switching: intercept writes to mapper register addresses.
-        // On real hardware the MegaROM chip only sees bus writes when its slot
-        // is selected for the page being written to.
-        //
+        // Fast skip for non-MegaROM games (the vast majority of writes go here).
+        // megaROMSlot is -1 when no MegaROM is loaded, so the slot comparison
+        // implicitly covers `megaROMData != nil`.
+        guard megaROMSlot >= 0, addr >= 0x4000, addr < 0xC000 else { return }
+
         // PC-based filtering: Block bank switches from BIOS code (PC < 0x4000).
         // C-BIOS's slot scan routine at ~0x0D43 writes test values to
         // 0x6000-0xBFFF to detect RAM/ROM, which corrupts MegaROM bank
         // registers.  Game code (PC 0x4000-0xBFFF) and RAM trampolines
         // (PC 0xC000-0xFFFF, used by ASCII mappers for self-switching)
         // are allowed through.
-        if megaROMData != nil && addr >= 0x4000 && addr < 0xC000 {
-            let page = Int(addr >> 14)
-            if Int(pageSlot[page]) == megaROMSlot && pc >= 0x4000 {
-                writeMegaROMRegister(addr, value, pc: pc)
-            }
+        let page = Int(addr >> 14)
+        if Int(pageSlot[page]) == megaROMSlot && pc >= 0x4000 {
+            writeMegaROMRegister(addr, value, pc: pc)
         }
-
-        // On MSX1 hardware, the RAM chip is always present on the write bus
-        // regardless of slot selection. Slot mapping only affects reads.
-        // This allows C-BIOS to use the stack (page 3) before configuring
-        // port 0xA8 to officially map RAM to page 3.
-        ram[Int(addr)] = value
     }
 
     /// Handle MegaROM mapper register writes and update bank selection.
