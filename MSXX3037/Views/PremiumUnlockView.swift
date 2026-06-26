@@ -43,7 +43,7 @@ struct PremiumUnlockView: View {
         } message: {
             Text(alertMessage)
         }
-        .onChange(of: store.purchaseState) { state in
+        .onChange(of: store.purchaseState) { _, state in
             switch state {
             case .success:
                 alertMessage = "Thank you for your purchase!\nAll Premium features are now unlocked."
