@@ -1195,11 +1195,10 @@ final class EmulatorViewModel: ObservableObject {
     /// true の間はスプラッシュで Metal 画面を隠す（C-BIOS ブート中）
     @Published var showSplash       = true
 
-    /// ゲーム速度（0.5x〜3.0x、デフォルト1.0x）
-    /// 体感キャリブレーション:
-    ///   体感1.0x = multiplier 2.4
-    ///   体感1.5x = multiplier 6.0
-    ///   → multiplier = 2.4 * pow(speed, 2.26)
+    /// ゲーム速度（0.5x〜2.0x、デフォルト1.0x）
+    /// draw() は 60Hz 固定（preferredFramesPerSecond=60）で、1描画あたり
+    /// speedMultiplier 個の MSX フレームを進める（実効 MSX fps = 60 × multiplier）。
+    /// fps=60 前提なので multiplier=1.0（＝speedValue 1.0x）で実機 NTSC(≈60fps) 相当。
     @Published var speedValue: Double = 1.0 {
         didSet { applySpeed() }
     }
@@ -1209,11 +1208,10 @@ final class EmulatorViewModel: ObservableObject {
         String(format: "%.1fx", speedValue)
     }
 
-    /// べき乗指数（体感キャリブレーションから算出: log(2.5)/log(1.5)）
-    private let speedExponent = log(2.5) / log(1.5)  // ≈ 2.26
-
     private func applySpeed() {
-        renderer?.speedMultiplier = 2.4 * pow(speedValue, speedExponent)
+        // speedValue をそのまま「1描画で進める MSX フレーム数」に使う。
+        // 1.0x → 60fps（実機相当）、2.0x → 120fps、0.5x → 30fps。
+        renderer?.speedMultiplier = speedValue
     }
 
     /// セーブ/ロード操作のフィードバック用
