@@ -558,7 +558,7 @@ struct SettingsView: View {
                             NavigationLink {
                                 PremiumUnlockView()
                             } label: {
-                                Label("Gamepad B / C / D / E は Premium で解放", systemImage: "lock.fill")
+                                Label("Gamepad B / C / D / E — unlock with Premium", systemImage: "lock.fill")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -659,9 +659,9 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
-                        SupportTitlesView()
+                        CompatibilityView()
                     } label: {
-                        Label("Support Titles", systemImage: "list.star")
+                        Label("Compatibility", systemImage: "checkmark.seal")
                     }
                 }
             }
@@ -773,7 +773,7 @@ struct EmulatorView: View {
                 PremiumUnlockView()
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button("閉じる") { viewModel.showPremiumSheet = false }
+                            Button("Close") { viewModel.showPremiumSheet = false }
                         }
                     }
             }
@@ -1333,7 +1333,7 @@ final class EmulatorViewModel: ObservableObject {
                 let ext = url.pathExtension.lowercased()
                 let supportedExts = ["rom", "bin", "zip", "dsk"]
                 guard supportedExts.contains(ext) else {
-                    showError(message: "非対応の拡張子です: .\(ext)\n対応形式: .rom / .bin / .zip / .dsk")
+                    showError(message: "Unsupported file type: .\(ext)\nSupported formats: .rom / .bin / .zip / .dsk")
                     return
                 }
 

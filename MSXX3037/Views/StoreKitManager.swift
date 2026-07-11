@@ -70,7 +70,7 @@ final class StoreKitManager: ObservableObject {
     // MARK: - Purchase
     func purchase() async {
         guard let product = product else {
-            purchaseState = .failed("製品情報を取得中です。しばらくお待ちください。")
+            purchaseState = .failed("Product information is still loading. Please try again in a moment.")
             return
         }
         purchaseState = .purchasing
@@ -100,7 +100,7 @@ final class StoreKitManager: ObservableObject {
             if isPremium {
                 purchaseState = .success
             } else {
-                purchaseState = .failed("復元できる購入履歴が見つかりませんでした。")
+                purchaseState = .failed("No previous purchase was found to restore.")
             }
         } catch {
             purchaseState = .failed(error.localizedDescription)
