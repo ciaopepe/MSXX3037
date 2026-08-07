@@ -5,6 +5,7 @@ import MetalKit
 import AVKit
 import UniformTypeIdentifiers
 import Combine
+import CryptoKit
 
 // MARK: - Metal Renderer
 final class MSXRenderer: NSObject, MTKViewDelegate {
@@ -1307,6 +1308,24 @@ final class EmulatorViewModel: ObservableObject {
         }
     }
 
+    // MARK: - 無料枠 ROM の識別
+
+    /// 無料枠として確定した ROM の識別子を保存するキー
+    private static let freeROMKey = "free_rom_id"
+
+    /// 無料枠で確定した ROM の識別子。
+    /// UserDefaults に永続化するため、アプリを再起動しても制限は解除されない。
+    static var freeROMIdentifier: String? {
+        get { UserDefaults.standard.string(forKey: freeROMKey) }
+        set { UserDefaults.standard.set(newValue, forKey: freeROMKey) }
+    }
+
+    /// ファイルの中身から ROM を一意に識別する。
+    /// パスや名前ではなく内容で判定するので、リネーム・移動しても同一 ROM と見なせる。
+    static func romIdentifier(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     func handleFilePick(_ url: URL) {
         guard url.startAccessingSecurityScopedResource() else {
             showError(message: "No permission to access the file")
@@ -1321,21 +1340,29 @@ final class EmulatorViewModel: ObservableObject {
                 isRunning = true
                 machine.start()
             } else {
-                // Premium 未購入の場合、2本目の ROM 読み込みをブロック
-                if loadedCartridge && !StoreKitManager.shared.isPremium {
-                    showPremiumRequired()
-                    return
-                }
-
-                let name = url.deletingPathExtension().lastPathComponent
-                machine.cartridgeName = name
-
+                // 先に拡張子を検証する。読み込めないファイルに対しては
+                // ペイウォールではなく正確なエラーを返す。
                 let ext = url.pathExtension.lowercased()
                 let supportedExts = ["rom", "bin", "zip", "dsk"]
                 guard supportedExts.contains(ext) else {
                     showError(message: "Unsupported file type: .\(ext)\nSupported formats: .rom / .bin / .zip / .dsk")
                     return
                 }
+
+                let romID = Self.romIdentifier(for: data)
+
+                // Premium 未購入は無料枠の1本のみ。判定は永続化した識別子で行うため、
+                // アプリを再起動しても制限は解除されない。
+                // ただし同じ ROM の再読込は常に許可し、無料の1本を選び直せずに詰むのを防ぐ。
+                if !StoreKitManager.shared.isPremium,
+                   let freeID = Self.freeROMIdentifier,
+                   freeID != romID {
+                    showPremiumRequired()
+                    return
+                }
+
+                let name = url.deletingPathExtension().lastPathComponent
+                machine.cartridgeName = name
 
                 let ok: Bool
                 if ext == "dsk" {
@@ -1347,6 +1374,11 @@ final class EmulatorViewModel: ObservableObject {
                 if ok {
                     machine.reset()
                     loadedCartridge = true
+                    // 読み込みに成功したものだけを無料枠として確定する
+                    //（非対応ファイルや壊れた ROM で枠を消費させない）
+                    if !StoreKitManager.shared.isPremium, Self.freeROMIdentifier == nil {
+                        Self.freeROMIdentifier = romID
+                    }
                     showSplash = true
                     if !isRunning {
                         isRunning = true
