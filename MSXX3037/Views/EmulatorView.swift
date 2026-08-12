@@ -518,15 +518,17 @@ struct SettingsView: View {
                             .font(.system(size: 28, weight: .bold, design: .monospaced))
                             .foregroundColor(.cyan)
 
-                        Slider(value: $speedValue, in: 0.5...2.0, step: 0.1)
+                        Slider(value: $speedValue,
+                               in: EmulatorViewModel.speedRange,
+                               step: 0.1)
                             .tint(.cyan)
 
                         HStack {
-                            Text("0.5x")
+                            Text(String(format: "%.1fx", EmulatorViewModel.speedRange.lowerBound))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
                             Spacer()
-                            Text("2.0x")
+                            Text(String(format: "%.1fx", EmulatorViewModel.speedRange.upperBound))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
                         }
@@ -1196,12 +1198,24 @@ final class EmulatorViewModel: ObservableObject {
     /// true の間はスプラッシュで Metal 画面を隠す（C-BIOS ブート中）
     @Published var showSplash       = true
 
-    /// ゲーム速度（0.5x〜2.0x、デフォルト1.0x）
+    /// ゲーム速度の設定可能範囲（50%〜300%）
+    static let speedRange: ClosedRange<Double> = 0.5...3.0
+
+    /// ゲーム速度（0.5x〜3.0x、デフォルト1.0x）
     /// draw() は 60Hz 固定（preferredFramesPerSecond=60）で、1描画あたり
     /// speedMultiplier 個の MSX フレームを進める（実効 MSX fps = 60 × multiplier）。
     /// fps=60 前提なので multiplier=1.0（＝speedValue 1.0x）で実機 NTSC(≈60fps) 相当。
     @Published var speedValue: Double = 1.0 {
-        didSet { applySpeed() }
+        didSet {
+            // 旧セーブデータの復元などで範囲外の値が入っても破綻しないよう丸める
+            let clamped = min(max(speedValue, EmulatorViewModel.speedRange.lowerBound),
+                              EmulatorViewModel.speedRange.upperBound)
+            if clamped != speedValue {
+                speedValue = clamped     // 再代入で再度 didSet が走り applySpeed される
+                return
+            }
+            applySpeed()
+        }
     }
 
     /// 速度ラベル（HUDやコントロールバーに表示）
@@ -1211,7 +1225,7 @@ final class EmulatorViewModel: ObservableObject {
 
     private func applySpeed() {
         // speedValue をそのまま「1描画で進める MSX フレーム数」に使う。
-        // 1.0x → 60fps（実機相当）、2.0x → 120fps、0.5x → 30fps。
+        // 0.5x → 30fps、1.0x → 60fps（実機相当）、2.0x → 120fps、3.0x → 180fps。
         renderer?.speedMultiplier = speedValue
     }
 
