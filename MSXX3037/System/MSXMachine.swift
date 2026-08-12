@@ -11,6 +11,8 @@ final class MSXMachine {
     let psg = PSG()
     let memory = MSXMemory()
     let fdc = FDC()
+    /// カセットテープ（テープにセーブするゲーム用）
+    let tape = CassetteTape()
 
     // MARK: - Disk System
     var diskMode = false                // true when .dsk is loaded (vs cartridge mode)
@@ -345,6 +347,8 @@ final class MSXMachine {
         // reset() will set primarySlotReg = 0x00 so C-BIOS
         // performs its own slot scan and detects the cartridge.
         cartridgeLoaded = true
+        // このカートリッジのテープ（セーブデータ）を接続する
+        attachTape()
         return true
     }
 
@@ -581,6 +585,30 @@ final class MSXMachine {
                             continue
                         }
                     }
+                }
+            }
+
+            // ── Cassette tape BIOS hooks ──
+            // C-BIOS のテープルーチン (0x00E1-0x00F0) はルーチン名を表示して
+            // CF=1 (エラー) を返すだけのスタブなので、テープにセーブするゲーム
+            // (Knightmare III - Shalom 等) の SAVE / CONTINUE が成立しない。
+            // BIOS エントリを捕捉して CassetteTape で処理する。
+            // 先頭の 2 比較でほぼ全ての命令が弾かれるためホットパスへの影響は小さい。
+            if cpu.PC >= 0x00E1 && cpu.PC <= 0x00F0
+                && Int(memory.primarySlotReg & 0x03) == 0 {
+                var hooked = true
+                switch cpu.PC {
+                case 0x00E1: handleTAPION()
+                case 0x00E4: handleTAPIN()
+                case 0x00E7: handleTAPIOF()
+                case 0x00EA: handleTAPOON()
+                case 0x00ED: handleTAPOUT()
+                case 0x00F0: handleTAPOOF()
+                default:     hooked = false
+                }
+                if hooked {
+                    cycles += 100
+                    continue
                 }
             }
 
@@ -969,7 +997,8 @@ final class MSXMachine {
     // MARK: - Disk BIOS Hook Handlers
 
     /// RET 命令をシミュレート: スタックからリターンアドレスを POP して PC に設定
-    private func diskRET() {
+    /// BIOS フック処理後に RET 相当（スタックから戻り先を取り出して PC に設定）
+    private func biosHookRET() {
         let lo = UInt16(memory.read(cpu.SP))
         let hi = UInt16(memory.read(cpu.SP &+ 1))
         cpu.SP = cpu.SP &+ 2
@@ -992,7 +1021,7 @@ final class MSXMachine {
             cpu.A = 2           // Not ready
             cpu.B = UInt8(sectorCount)
             cpu.flagC = true
-            diskRET()
+            biosHookRET()
             return
         }
 
@@ -1016,7 +1045,7 @@ final class MSXMachine {
                 cpu.A = 2       // Not ready
                 cpu.B = UInt8(sectorCount)
                 cpu.flagC = true
-                diskRET()
+                biosHookRET()
                 return
             }
             for (i, byte) in data.enumerated() {
@@ -1031,7 +1060,7 @@ final class MSXMachine {
                          isWrite ? "WRITE" : "READ", drive, startSector, sectorCount,
                          bufferAddr, cpu.flagC ? "ERR" : "OK"))
         }
-        diskRET()
+        biosHookRET()
     }
 
     /// DSKCHG — ディスク交換チェック
@@ -1044,7 +1073,7 @@ final class MSXMachine {
             cpu.B = 0x01        // Not changed
         }
         cpu.flagC = false       // Success
-        diskRET()
+        biosHookRET()
     }
 
     /// GETDPB — Disk Parameter Block を返す (720KB 3.5" standard)
@@ -1072,13 +1101,73 @@ final class MSXMachine {
             memory.ram[(addr + i) & 0xFFFF] = byte
         }
         cpu.flagC = false
-        diskRET()
+        biosHookRET()
     }
 
     /// MTOFF — モーターオフ (何もしない)
     private func handleMTOFF() {
         fdc.motorOn = false
-        diskRET()
+        biosHookRET()
+    }
+
+    // MARK: - カセットテープ BIOS フック
+    //
+    // MSX BIOS のテープ API:
+    //   TAPION (00E1) ヘッダ検出 → CF=0 成功 / CF=1 失敗
+    //   TAPIN  (00E4) 1 バイト読み → A=データ, CF=1 でエラー
+    //   TAPIOF (00E7) 読み出し終了
+    //   TAPOON (00EA) ヘッダ書き込み → A≠0 でロングヘッダ, CF=1 で中断
+    //   TAPOUT (00ED) 1 バイト書き → A=データ, CF=1 で中断
+    //   TAPOOF (00F0) 書き込み終了
+
+    /// テープイメージの保存先（カートリッジ別）
+    private var tapeURL: URL? {
+        guard !cartridgeName.isEmpty else { return nil }
+        return saveDirectory.appendingPathComponent("cassette.tape")
+    }
+
+    /// カートリッジに対応するテープを読み込む（loadCartridge から呼ばれる）
+    private func attachTape() {
+        tape.eject()
+        tape.fileURL = tapeURL
+        tape.load()
+    }
+
+    private func handleTAPION() {
+        cpu.flagC = !tape.beginRead(frame: frameCount)
+        biosHookRET()
+    }
+
+    private func handleTAPIN() {
+        if let b = tape.readByte(frame: frameCount) {
+            cpu.A = b
+            cpu.flagC = false
+        } else {
+            cpu.flagC = true
+        }
+        biosHookRET()
+    }
+
+    private func handleTAPIOF() {
+        tape.endRead()
+        biosHookRET()
+    }
+
+    private func handleTAPOON() {
+        tape.beginWrite(longHeader: cpu.A != 0, frame: frameCount)
+        cpu.flagC = false
+        biosHookRET()
+    }
+
+    private func handleTAPOUT() {
+        tape.writeByte(cpu.A, frame: frameCount)
+        cpu.flagC = false
+        biosHookRET()
+    }
+
+    private func handleTAPOOF() {
+        tape.endWrite()
+        biosHookRET()
     }
 
     /// performDiskBoot — C-BIOS 初期化完了後にブートセクタを直接ロードして実行
