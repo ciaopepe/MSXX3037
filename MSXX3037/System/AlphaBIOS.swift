@@ -399,6 +399,40 @@ enum AlphaBIOS {
             writeBytes(&rom, at: 0x1A65, bytes: hookPatch)
         }
 
+        // ── Patch 12: カートリッジスキャンのスロット番号破壊を修正 ──
+        // C-BIOS のスキャンループ (0x0E33-0x0E58) は A をスロット番号として
+        // 引き回すが、INIT 呼び出し直前の VBlank 待ち
+        //   0EB6: IN A,(99) / OR A / JP M,0EB6
+        // が A を VDP ステータスで上書きしてしまう。この値が 0EBC の PUSH AF →
+        // 0EC3 の POP AF 経由でループcarrierに戻るため、ステータスが 0x00 だと
+        // スロット番号が 0 に巻き戻り、slot 1 を無限に再スキャンする。
+        //
+        // 症状: INIT が延々と呼ばれ続け、スキャンの RET (0x0E58) に到達しない。
+        //       画面が "Init ROM in slot: 1" で埋まり、INIT が制御を返す方式の
+        //       ゲーム (H.STKE フック型: Shalom 等) が起動しない。
+        //       INIT が制御を奪うゲーム (Galious 等) はループを抜けるため無症状。
+        //
+        // 修正: VBlank 待ちを 0x3FE0 へ退避し、待機後に IY から AF を復元する。
+        //       IY は直前の 0EB3-0EB4 (PUSH AF / POP IY) でスロット番号を保持
+        //       しているため、PUSH IY / POP AF で AF を完全に復元できる。
+        //       配置先 0x3FE0 は他パッチ (0x3F00-0x3FDx) と重ならない空き領域。
+        if rom[0x0EB6] == 0xDB && rom[0x0EB7] == 0x99 &&
+           rom[0x0EB8] == 0xB7 && rom[0x0EB9] == 0xFA &&
+           rom[0x0EBA] == 0xB6 && rom[0x0EBB] == 0x0E {
+            // 0EB6: JP 0x3FE0 + 余りを NOP 埋め
+            writeBytes(&rom, at: 0x0EB6, bytes: [0xC3, 0xE0, 0x3F, 0x00, 0x00, 0x00])
+            // 0x3FE0: VBlank 待ち → AF 復元 → 元の PUSH AF (0x0EBC) へ復帰
+            let waitCode: [UInt8] = [
+                0xDB, 0x99,             // IN A,(99)
+                0xB7,                   // OR A
+                0xFA, 0xE0, 0x3F,       // JP M,0x3FE0   ; bit7 が下りるまで待つ
+                0xFD, 0xE5,             // PUSH IY
+                0xF1,                   // POP AF        ; AF = スロット番号(復元)
+                0xC3, 0xBC, 0x0E,       // JP 0x0EBC
+            ]
+            writeBytes(&rom, at: 0x3FE0, bytes: waitCode)
+        }
+
         // ── Patch 5: ワークエリア初期化修正 ──
         // C-BIOS はブート時に F380-FFFC を一括ゼロ初期化するが、
         // 一部の変数がデフォルト値のまま放置される。
