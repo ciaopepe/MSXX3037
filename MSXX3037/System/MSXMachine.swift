@@ -13,6 +13,8 @@ final class MSXMachine {
     let fdc = FDC()
     /// カセットテープ（テープにセーブするゲーム用）
     let tape = CassetteTape()
+    /// MSX2 時計 IC (I/O 0xB4/0xB5)
+    let rtc = RTC()
 
     // MARK: - Disk System
     var diskMode = false                // true when .dsk is loaded (vs cartridge mode)
@@ -244,6 +246,11 @@ final class MSXMachine {
         case 0xA2:          // PSG data read (read only mirror)
             let val = psg.readData()
             return val
+        case 0xB5:          // MSX2 RTC (RP-5C01) データ読み出し
+            return rtc.read()
+        case 0xFC, 0xFD, 0xFE, 0xFF:
+            // MSX2 メモリマッパー: ページ 0-3 のセグメント番号読み出し
+            return memory.ram.readSegment(page: Int(port) - 0xFC)
         default:
             return 0xFF
         }
@@ -284,6 +291,13 @@ final class MSXMachine {
             psg.writeAddress(value)
         case 0xA1:          // PSG data write
             psg.writeData(value)
+        case 0xB4:          // MSX2 RTC: レジスタ選択
+            rtc.selectRegister(value)
+        case 0xB5:          // MSX2 RTC: データ書き込み
+            rtc.write(value)
+        case 0xFC, 0xFD, 0xFE, 0xFF:
+            // MSX2 メモリマッパー: ページ 0-3 に見せるセグメントを選択
+            memory.ram.selectSegment(page: Int(port) - 0xFC, value: value)
         default:
             break
         }
@@ -481,7 +495,7 @@ final class MSXMachine {
         // Without this, C-BIOS finds its warm-start signature still in RAM and
         // may skip the cartridge slot-scan, so a newly loaded cartridge would
         // never be detected.
-        memory.ram = [UInt8](repeating: 0, count: 0x10000)
+        memory.ram.clear()
         // Full VDP reset: registers, VRAM, status, latches, palette, commands
         vdp.reset()
         cycleBudget = 0
@@ -666,7 +680,13 @@ final class MSXMachine {
         "0": (0,0), "1": (0,1), "2": (0,2), "3": (0,3), "4": (0,4),
         "5": (0,5), "6": (0,6), "7": (0,7),
         "8": (1,0), "9": (1,1), "-": (1,2), "=": (1,3),
-        "A": (2,1), "B": (2,0),
+        "\\": (1,4), "[": (1,5), "]": (1,6), ";": (1,7),
+        // row2 は MSX 標準マトリクスでは bit0-7 が ` ' , . / _ A B の順。
+        // 以前は記号が未実装で A/B を bit1/bit0 に置いていたが、
+        // 記号キー追加にあたり本来の bit6/bit7 へ修正した。
+        "`": (2,0), "'": (2,1), ",": (2,2), ".": (2,3),
+        "/": (2,4), "_": (2,5),
+        "A": (2,6), "B": (2,7),
         "C": (3,0), "D": (3,1), "E": (3,2), "F": (3,3),
         "G": (3,4), "H": (3,5), "I": (3,6), "J": (3,7),
         "K": (4,0), "L": (4,1), "M": (4,2), "N": (4,3),
@@ -732,6 +752,10 @@ final class MSXMachine {
         // Memory
         var memRam: [UInt8]
         var memSlot1: [UInt8]?   // カートリッジスロットのみ保存
+        /// MSX2 メモリマッパーのセグメント選択 (旧セーブには無いので Optional)
+        var memMapperSegments: [UInt8]?
+        /// MSX2 RTC の CMOS 内容 (旧セーブには無いので Optional)
+        var rtcState: [UInt8]?
         var memPageSlot: [UInt8]
         var memPrimarySlotReg: UInt8
 
@@ -771,8 +795,10 @@ final class MSXMachine {
             psgRegs: psg.regs,
             psgAddressLatch: psg.addressLatch,
             psgPortA: psg.portA, psgPortB: psg.portB,
-            memRam: memory.ram,
+            memRam: memory.ram.storage,
             memSlot1: memory.slots[1],
+            memMapperSegments: memory.ram.segment,
+            rtcState: rtc.snapshot,
             memPageSlot: memory.pageSlot,
             memPrimarySlotReg: memory.primarySlotReg,
             frameCount: frameCount,
@@ -837,7 +863,9 @@ final class MSXMachine {
         psg.portA = s.psgPortA; psg.portB = s.psgPortB
 
         // Memory
-        memory.ram = s.memRam
+        // 旧形式 (64KB フラット) のセーブも読み込めるよう restore 側で吸収する
+        memory.ram.restore(storage: s.memRam, segments: s.memMapperSegments)
+        if let r = s.rtcState { rtc.restore(r) }
         if let slot1 = s.memSlot1 { memory.slots[1] = slot1 }
         memory.primarySlotReg = s.memPrimarySlotReg  // pageSlot も自動更新
 

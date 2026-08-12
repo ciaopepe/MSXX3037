@@ -3,22 +3,132 @@
 
 import Foundation
 
+/// MSX2 メモリマッパー付き RAM。
+///
+/// MSX2 では RAM が 16KB セグメント単位で管理され、I/O ポート 0xFC-0xFF
+/// (ページ 0-3 に対応) で「どのセグメントをそのページに見せるか」を選ぶ。
+/// 実体は `storage` に全セグメントを持ち、`pageBase` が各ページの先頭オフセット。
+///
+/// 既存コードは `ram[0xF341] = 3` のように 64KB アドレスで直接アクセスしているため、
+/// 同じ記法のまま透過的にマッパーを通すよう subscript を提供する。
+struct MapperRAM {
+    /// セグメント数 (16KB × 8 = 128KB。MSX2 の標準的な構成)
+    static let segmentCount = 8
+    static let segmentSize  = 0x4000
+
+    private(set) var storage: [UInt8]
+    /// 各ページ (0-3) が指すセグメントの先頭オフセット
+    private(set) var pageBase: [Int]
+    /// 各ページに割り当てられたセグメント番号 (ポート 0xFC-0xFF の値)
+    private(set) var segment: [UInt8]
+
+    init() {
+        storage = [UInt8](repeating: 0, count: MapperRAM.segmentCount * MapperRAM.segmentSize)
+        // 電源投入時はページ N → セグメント N。
+        // これにより 64KB が連続して見え、マッパー非対応ソフト
+        // (C-BIOS や MSX1 ゲーム) は従来と全く同じ動作になる。
+        segment  = [0, 1, 2, 3]
+        pageBase = [0, MapperRAM.segmentSize, MapperRAM.segmentSize * 2, MapperRAM.segmentSize * 3]
+    }
+
+    @inline(__always)
+    subscript(addr: Int) -> UInt8 {
+        get { storage[pageBase[addr >> 14] &+ (addr & 0x3FFF)] }
+        set { storage[pageBase[addr >> 14] &+ (addr & 0x3FFF)] = newValue }
+    }
+
+    /// ポート 0xFC-0xFF への書き込み。page は 0-3。
+    mutating func selectSegment(page: Int, value: UInt8) {
+        let seg = Int(value) % MapperRAM.segmentCount
+        segment[page]  = value
+        pageBase[page] = seg * MapperRAM.segmentSize
+    }
+
+    /// ポート 0xFC-0xFF の読み出し。
+    /// 実機では未使用ビットが 1 で返るため、セグメント数に応じてマスクする。
+    func readSegment(page: Int) -> UInt8 {
+        segment[page] | ~UInt8(MapperRAM.segmentCount - 1)
+    }
+
+    /// セーブステート復元用
+    mutating func restore(storage newStorage: [UInt8], segments: [UInt8]?) {
+        if newStorage.count == storage.count {
+            storage = newStorage
+        } else {
+            // 旧形式 (64KB フラット) との後方互換: 先頭 64KB として取り込む
+            var s = [UInt8](repeating: 0, count: storage.count)
+            let n = min(newStorage.count, s.count)
+            s[0..<n] = newStorage[0..<n]
+            storage = s
+        }
+        if let segs = segments, segs.count == 4 {
+            for p in 0..<4 { selectSegment(page: p, value: segs[p]) }
+        } else {
+            segment  = [0, 1, 2, 3]
+            pageBase = [0, MapperRAM.segmentSize, MapperRAM.segmentSize * 2, MapperRAM.segmentSize * 3]
+        }
+    }
+
+    mutating func clear() {
+        storage = [UInt8](repeating: 0, count: MapperRAM.segmentCount * MapperRAM.segmentSize)
+        segment  = [0, 1, 2, 3]
+        pageBase = [0, MapperRAM.segmentSize, MapperRAM.segmentSize * 2, MapperRAM.segmentSize * 3]
+    }
+}
+
+/// 4 プライマリ × 4 セカンダリのスロット内容。
+///
+/// MSX の拡張スロットは 1 つのプライマリスロットを 4 つに分割する。
+/// MSX2 では標準で slot 0 が拡張され、0-0 に MAIN ROM、0-1 に SUB ROM が入る。
+///
+/// 既存コードとの互換のため、1 引数の subscript はサブスロット 0 を指す。
+struct SlotTable {
+    private var data = [[[UInt8]?]](repeating: [[UInt8]?](repeating: nil, count: 4), count: 4)
+
+    /// プライマリのみ指定 (= サブスロット 0)
+    subscript(primary: Int) -> [UInt8]? {
+        get { data[primary][0] }
+        set { data[primary][0] = newValue }
+    }
+
+    /// プライマリ + セカンダリ指定
+    subscript(primary: Int, secondary: Int) -> [UInt8]? {
+        get { data[primary][secondary] }
+        set { data[primary][secondary] = newValue }
+    }
+}
+
 final class MSXMemory {
     // MARK: - Memory
     static let totalRAM = 0x10000  // 64KB address space
 
-    var ram = [UInt8](repeating: 0, count: 0x10000)
+    /// MSX2 メモリマッパー付き RAM (128KB)
+    var ram = MapperRAM()
 
-    // Slot contents (up to 4 slots x 64KB each)
-    // slot 0: BIOS ROM
+    // Slot contents (4 primary × 4 secondary, 64KB each)
+    // slot 0: BIOS ROM (MSX2 では 0-0 が MAIN ROM, 0-1 が SUB ROM)
     // slot 1: cartridge (optional)
     // slot 2: cartridge (optional)
     // slot 3: RAM
-    var slots = [[UInt8]?](repeating: nil, count: 4)
+    //
+    // 既存コードは `slots[1] = data` のようにプライマリ番号のみで
+    // アクセスしているため、1 引数の subscript はサブスロット 0 を指す。
+    var slots = SlotTable()
+
+    /// 各プライマリスロットが拡張スロットか (0xFFFF のセカンダリスロットレジスタを持つか)
+    /// 既定は全て false = 非拡張。MSX1 相当の構成では従来と完全に同じ動作になる。
+    var slotExpanded = [Bool](repeating: false, count: 4)
+
+    /// 拡張スロットのセカンダリスロットレジスタ (プライマリスロットごと)
+    /// メモリアドレス 0xFFFF への書き込みで設定され、読み出しは反転値を返す。
+    var secondarySlotReg = [UInt8](repeating: 0, count: 4)
 
     // Page-to-slot mapping (4 pages of 16KB)
     // Controlled by I/O port 0xA8 (primary slot register)
     var pageSlot = [UInt8](repeating: 0, count: 4)  // slot # for each page
+
+    /// 各ページが参照するサブスロット番号 (pageSlot と secondarySlotReg から導出)
+    var pageSubSlot = [UInt8](repeating: 0, count: 4)
 
     // MSX keyboard matrix (9 rows x 8 columns)
     // Row 0-7: standard keys; Row 8: SPACE / cursor keys / edit keys
@@ -32,7 +142,29 @@ final class MSXMemory {
             pageSlot[1] = (primarySlotReg >> 2) & 0x03
             pageSlot[2] = (primarySlotReg >> 4) & 0x03
             pageSlot[3] = (primarySlotReg >> 6) & 0x03
+            updatePageSubSlots()
         }
+    }
+
+    /// pageSlot と各プライマリのセカンダリスロットレジスタから
+    /// 「そのページが実際に見るサブスロット番号」を求める。
+    /// 非拡張スロットは常に 0。
+    func updatePageSubSlots() {
+        for page in 0..<4 {
+            let primary = Int(pageSlot[page])
+            if slotExpanded[primary] {
+                pageSubSlot[page] = (secondarySlotReg[primary] >> (page * 2)) & 0x03
+            } else {
+                pageSubSlot[page] = 0
+            }
+        }
+    }
+
+    /// 拡張スロットとして構成する (MSX2 の slot 0 など)
+    func setExpanded(_ primary: Int, _ expanded: Bool) {
+        guard primary >= 0 && primary < 4 else { return }
+        slotExpanded[primary] = expanded
+        updatePageSubSlots()
     }
 
     // MARK: - Init
@@ -303,10 +435,16 @@ final class MSXMemory {
         let page = Int(addr >> 14)
         let slot = Int(pageSlot[page])
 
+        // 拡張スロットのセカンダリスロットレジスタ (0xFFFF) は反転値を返す。
+        // ソフトはこの「書いた値と読んだ値が反転している」性質で拡張スロットを検出する。
+        if addr == 0xFFFF && slotExpanded[slot] {
+            return ~secondarySlotReg[slot]
+        }
+
         // Hot path: slot has data (BIOS / cartridge). The MegaROM check
         // implicitly gates on `megaROMData != nil` because megaROMSlot is
         // -1 when no MegaROM is loaded (slot is always 0..3, never -1).
-        if let slotData = slots[slot] {
+        if let slotData = slots[slot, Int(pageSubSlot[page])] {
             if slot == megaROMSlot && addr >= 0x4000 && addr < 0xC000 {
                 return readMegaROM(addr)
             }
@@ -346,6 +484,16 @@ final class MSXMemory {
     // MARK: - Memory Write
     @inline(__always)
     func write(_ addr: UInt16, _ value: UInt8, pc: UInt16 = 0) {
+        // 拡張スロットのセカンダリスロットレジスタ (0xFFFF)
+        if addr == 0xFFFF {
+            let slot = Int(pageSlot[3])
+            if slotExpanded[slot] {
+                secondarySlotReg[slot] = value
+                updatePageSubSlots()
+                return
+            }
+        }
+
         // On MSX1 hardware, the RAM chip is always present on the write bus
         // regardless of slot selection. Slot mapping only affects reads.
         // This allows C-BIOS to use the stack (page 3) before configuring
