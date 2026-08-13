@@ -63,11 +63,20 @@ final class CassetteTape {
     // MARK: - 書き込み (TAPOON / TAPOUT / TAPOOF)
 
     /// TAPOON: ヘッダを書いてブロックを開始する。
-    /// 書き込みセッションの開始時だけ先頭へ巻き戻し、以降は前へ進みながら上書きする。
-    /// （実機でテープを巻き戻して録音し直す操作に相当）
+    ///
+    /// 実機では新しいヘッダを書き始めた時点で直前のブロックは確定する。
+    /// TAPOOF は「書き込みを終える」だけで、ブロック境界は TAPOON が作る。
+    ///
+    /// 実際 Shalom のセーブは TAPOOF を挟まずに TAPOON を連続で呼ぶ:
+    ///   TAPOON(long) → TAPOUT×16 (0xEA×10 + "SHALOM")
+    ///   TAPOON(short) → TAPOUT×63 → TAPOOF
+    /// ここで直前のブロックを確定しないとヘッダブロックが失われ、
+    /// ロード時に識別子が見つからず CONTINUE できなくなる。
     func beginWrite(longHeader: Bool, frame: Int) {
-        if isNewSession(.write) {
-            writeBlock = 0      // 巻き戻し。既存ブロックは上書きされるまで残す
+        if isWriting {
+            commitBlock()       // TAPOOF を挟まない連続 TAPOON に対応
+        } else if isNewSession(.write) {
+            writeBlock = 0      // 書き込みセッション開始 → 頭出し
         }
         lastOp = .write
         writeBuffer.removeAll()
@@ -81,10 +90,14 @@ final class CassetteTape {
         writeBuffer.append(b)
     }
 
-    /// TAPOOF: ブロックを確定してファイルへ保存する。
-    /// 現在の書き込み位置に上書きし、位置を 1 つ進める。
+    /// TAPOOF: 書き込みを終了する。書きかけのブロックを確定する。
     func endWrite() {
         guard isWriting else { return }
+        commitBlock()
+    }
+
+    /// 書きかけのブロックを現在の書き込み位置へ確定し、位置を 1 つ進める。
+    private func commitBlock() {
         let block = Block(longHeader: writeLong, data: writeBuffer)
         if writeBlock < blocks.count {
             blocks[writeBlock] = block
