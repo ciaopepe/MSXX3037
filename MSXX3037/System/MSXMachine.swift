@@ -768,6 +768,9 @@ final class MSXMachine {
 
         // Settings (optional for backward compatibility with old save files)
         var settings: SettingsSnapshot?
+
+        /// カセットテープの内容（旧セーブには無いので Optional）
+        var tape: CassetteTape.Snapshot?
     }
 
     /// 現在の状態をスナップショットとして取得
@@ -805,7 +808,8 @@ final class MSXMachine {
             keyboardRow: keyboardRow,
             ppiPortC: ppiPortC,
             cartridgeLoaded: cartridgeLoaded,
-            gameStartFired: gameStartFired
+            gameStartFired: gameStartFired,
+            tape: tape.snapshot
         )
     }
 
@@ -875,6 +879,9 @@ final class MSXMachine {
         ppiPortC = s.ppiPortC
         cartridgeLoaded = s.cartridgeLoaded
         gameStartFired = s.gameStartFired
+
+        // カセットテープ（旧セーブには無いので保持されている内容はそのまま残す）
+        if let t = s.tape { tape.restore(t) }
 
         // キーマトリクスをクリア（全キー離す）
         for i in 0..<9 { memory.keyMatrix[i] = 0xFF }

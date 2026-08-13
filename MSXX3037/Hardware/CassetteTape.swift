@@ -16,7 +16,7 @@ import Foundation
 final class CassetteTape {
 
     /// テープ上の 1 ブロック
-    struct Block {
+    struct Block: Codable {
         var longHeader: Bool    // TAPOON の A≠0 (ロングヘッダ) か
         var data: [UInt8]
     }
@@ -113,6 +113,35 @@ final class CassetteTape {
     func endRead() {
         if readBlock < blocks.count { readBlock += 1 }
         readPos = 0
+    }
+
+    // MARK: - ステートセーブ連携
+    //
+    // .msxstate のスナップショットにテープの内容を含めるための API。
+    // これが無いと、ゲーム内でカセットテープにセーブしたデータが
+    // ステートセーブ（および書き出しファイル）に反映されず、
+    // 別の状態からロードした際にテープの中身が失われる。
+
+    struct Snapshot: Codable {
+        var blocks: [Block]
+        var readBlock: Int
+        var readPos: Int
+    }
+
+    var snapshot: Snapshot {
+        Snapshot(blocks: blocks, readBlock: readBlock, readPos: readPos)
+    }
+
+    func restore(_ s: Snapshot) {
+        blocks = s.blocks
+        readBlock = s.readBlock
+        readPos = s.readPos
+        // 書き込み中の状態やセッション判定はスナップショットを跨がないので破棄する
+        writeBuffer.removeAll()
+        isWriting = false
+        lastOp = .none
+        // ロードした内容をディスクにも反映し、テープの永続化ファイルと一致させる
+        save()
     }
 
     // MARK: - 永続化
