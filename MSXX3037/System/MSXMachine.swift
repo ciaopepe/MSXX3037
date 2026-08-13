@@ -1022,6 +1022,29 @@ final class MSXMachine {
         return attrs[.modificationDate] as? Date
     }
 
+    /// ステートセーブを書き出し用に一時ファイルへコピーして URL を返す。
+    ///
+    /// 内部の保存名は `save_slot0.bin` で内容が分からないため、
+    /// 「<カートリッジ名>_slot1.msxstate」のような分かりやすい名前に付け替える。
+    /// 共有シートやファイルアプリへの書き出しに使う。
+    /// データが無い場合は nil。
+    func exportStateFile(slot: Int) -> URL? {
+        let src = saveURL(slot: slot)
+        guard FileManager.default.fileExists(atPath: src.path) else { return nil }
+
+        let base = cartridgeName.isEmpty ? "MSX" : MSXMachine.sanitizeName(cartridgeName)
+        let dst = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(base)_slot\(slot + 1).msxstate")
+        try? FileManager.default.removeItem(at: dst)
+        do {
+            try FileManager.default.copyItem(at: src, to: dst)
+            return dst
+        } catch {
+            print("[Export] slot \(slot): \(error)")
+            return nil
+        }
+    }
+
     // MARK: - Disk BIOS Hook Handlers
 
     /// RET 命令をシミュレート: スタックからリターンアドレスを POP して PC に設定

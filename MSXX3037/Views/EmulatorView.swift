@@ -730,9 +730,28 @@ struct SettingsView: View {
 }
 
 // MARK: - Emulator View
+/// 共有シートに渡すステートセーブの一時ファイル
+struct ExportItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// UIActivityViewController のラッパー（ステートセーブの書き出しに使用）
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
 struct EmulatorView: View {
     @StateObject private var viewModel = EmulatorViewModel()
     @ObservedObject private var keyboardMgr = ExternalKeyboardManager.shared
+    /// 書き出し中のステートセーブ（共有シート表示のトリガー）
+    @State private var exportItem: ExportItem?
 
     var body: some View {
         GeometryReader { geo in
@@ -1017,6 +1036,9 @@ struct EmulatorView: View {
                 )
         )
         .animation(.easeInOut(duration: 0.3), value: viewModel.saveLoadMessage)
+        .sheet(item: $exportItem) { item in
+            ShareSheet(items: [item.url])
+        }
     }
 
     private func saveLoadSlot(slot: Int) -> some View {
@@ -1101,6 +1123,21 @@ struct EmulatorView: View {
                     .cornerRadius(8)
             }
             .disabled(isPremium && !hasData)
+
+            // 書き出しボタン（ステートセーブを共有シートで出力）
+            Button {
+                if let url = viewModel.machine.exportStateFile(slot: slot) {
+                    exportItem = ExportItem(url: url)
+                }
+            } label: {
+                Label("EXPORT", systemImage: "square.and.arrow.up.on.square")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+                    .frame(width: 80, height: 32)
+                    .background(hasData ? Color.orange.opacity(0.6) : Color.gray.opacity(0.3))
+                    .cornerRadius(8)
+            }
+            .disabled(!hasData)
         }
     }
 
