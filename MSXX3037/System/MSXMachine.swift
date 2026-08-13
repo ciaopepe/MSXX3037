@@ -488,6 +488,14 @@ final class MSXMachine {
     }
 
     func reset() {
+        // テープは「中身は残したまま頭出しだけ行う」。
+        // LOAD STATE → RESET → ゲーム内 CONTINUE でテープから復帰できるように、
+        // 内容は消さない（実機でも RESET ボタンはテープの中身を消さない）。
+        // 一方 TAPION はテープを前へ送りながらヘッダを探すため、一度ロードすると
+        // 読み出し位置が末尾に残る。巻き戻さないとリセット後の CONTINUE が
+        // 即座に失敗するので、ここで頭出しする。
+        tape.rewind()
+
         // Reset slot register to hardware default (all pages = slot 0 = BIOS).
         // C-BIOS then configures RAM in page 3 and scans for cartridges.
         memory.primarySlotReg = 0x00

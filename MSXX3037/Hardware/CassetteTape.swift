@@ -39,6 +39,9 @@ final class CassetteTape {
     /// 書き込み位置（実機の「テープを巻き戻して録音し直す」に相当）
     private var writeBlock = 0
 
+    /// 現在の探索中に一度でも終端から先頭へ巻き戻したか（無限ループ防止）
+    private var searchWrapped = false
+
     /// 永続化先。nil の間はメモリ上のみ（カートリッジ未ロード時）。
     var fileURL: URL?
 
@@ -108,9 +111,19 @@ final class CassetteTape {
     /// 無限ループになる。
     func beginRead(frame: Int) -> Bool {
         if isNewSession(.read) {
-            readBlock = 0       // 巻き戻し
+            readBlock = 0           // 読み出しセッションの開始 → 頭出し
+            searchWrapped = false
         } else {
-            readBlock += 1      // 次のヘッダを探して前へ送る
+            readBlock += 1          // 次のヘッダを探して前へ送る
+            if readBlock >= blocks.count && !searchWrapped {
+                // 終端に達したら一度だけ頭出しして探し直す。
+                // 実機ではユーザーがテープを巻き戻す操作に相当し、
+                // リセットを挟まずに CONTINUE を再試行できるようにする。
+                // 2 周目でも見つからなければ false を返して打ち切るので、
+                // 目的のファイルが無いテープでも無限ループにはならない。
+                readBlock = 0
+                searchWrapped = true
+            }
         }
         lastOp = .read
         readPos = 0
@@ -131,6 +144,26 @@ final class CassetteTape {
     /// ブロックの送りは TAPION 側が行うため、ここでは位置を進めない。
     func endRead() {
         readPos = 0
+    }
+
+    // MARK: - 巻き戻し
+
+    /// テープの中身は残したまま、頭出し（読み書き位置を先頭へ）を行う。
+    ///
+    /// 本体リセット時に呼ぶ。TAPION は「テープを前へ送りながら次のヘッダを探す」
+    /// 挙動のため、一度ロードすると読み出し位置が末尾まで進んでいる。巻き戻さないと
+    /// リセット後の CONTINUE で 1 回目の TAPION がテープ終端に当たり、
+    /// 「ロードがしっぱいにおわりました」になってしまう。
+    /// 実機でもリセットボタンはテープの内容を消さず、ユーザーが頭出しして
+    /// ロードし直すため、この動作が実機の操作に相当する。
+    func rewind() {
+        readBlock = 0
+        readPos = 0
+        writeBlock = 0
+        writeBuffer.removeAll()
+        isWriting = false
+        searchWrapped = false
+        lastOp = .none      // 次の TAPION / TAPOON を必ず新セッション扱いにする
     }
 
     // MARK: - ステートセーブ連携
@@ -159,6 +192,7 @@ final class CassetteTape {
         isWriting = false
         lastOp = .none
         writeBlock = 0
+        searchWrapped = false
         // ロードした内容をディスクにも反映し、テープの永続化ファイルと一致させる
         save()
     }
@@ -190,6 +224,7 @@ final class CassetteTape {
         readPos = 0
         lastOp = .none
         writeBlock = 0
+        searchWrapped = false
         guard let url = fileURL, let data = try? Data(contentsOf: url) else { return }
         var i = 0
         while i + 5 <= data.count {
@@ -213,6 +248,7 @@ final class CassetteTape {
         readPos = 0
         lastOp = .none
         writeBlock = 0
+        searchWrapped = false
         fileURL = nil
     }
 
