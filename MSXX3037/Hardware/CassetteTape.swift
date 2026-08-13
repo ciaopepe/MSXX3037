@@ -32,37 +32,41 @@ final class CassetteTape {
     private var writeLong = false
     private var isWriting = false
 
-    /// 直前のテープ操作の種別。セッション境界の判定に使う。
+    /// 直前のテープ操作の種別。セッション境界（巻き戻し）の判定に使う。
     private enum LastOp { case none, read, write }
     private var lastOp: LastOp = .none
-    private var lastOpFrame = 0
 
-    /// セッションの区切りとみなすフレーム間隔。
-    /// ゲームは 1 回のセーブ/ロードで複数ブロックを連続して処理するため、
-    /// 連続操作は同一セッション、間隔が空いたら新しいセッションとして扱う。
-    private let sessionGapFrames = 120
+    /// 書き込み位置（実機の「テープを巻き戻して録音し直す」に相当）
+    private var writeBlock = 0
 
     /// 永続化先。nil の間はメモリ上のみ（カートリッジ未ロード時）。
     var fileURL: URL?
 
     // MARK: - セッション判定
+    //
+    // 実機のテープは「巻き戻さない限り前へ進む」。1 回のセーブ/ロードで
+    // ゲームは複数ブロックを連続して処理する（例: Shalom のセーブは
+    // ヘッダブロック(0xEA×10 + ファイル名) とデータブロックの 2 つ）。
+    //
+    // 以前は「一定フレーム以上間隔が空いたら新セッション」というヒューリスティック
+    // を使っていたが、ブロック間の待ち時間が長いとセッションが切れたと誤判定して
+    // 先行ブロックを消してしまい、ヘッダブロックが失われてロードできなくなっていた。
+    // 時間ではなく「読み↔書きの切り替わり」だけで巻き戻しを判定する。
 
-    private func isNewSession(_ op: LastOp, frame: Int) -> Bool {
-        if lastOp == .none { return true }
-        if lastOp != op { return true }
-        return frame - lastOpFrame > sessionGapFrames
+    private func isNewSession(_ op: LastOp) -> Bool {
+        lastOp != op       // .none からの初回も必ず true になる
     }
 
     // MARK: - 書き込み (TAPOON / TAPOUT / TAPOOF)
 
     /// TAPOON: ヘッダを書いてブロックを開始する。
-    /// 新しいセッションならテープを巻き戻して上書きする（実機で録音し直す操作に相当）。
+    /// 書き込みセッションの開始時だけ先頭へ巻き戻し、以降は前へ進みながら上書きする。
+    /// （実機でテープを巻き戻して録音し直す操作に相当）
     func beginWrite(longHeader: Bool, frame: Int) {
-        if isNewSession(.write, frame: frame) {
-            blocks.removeAll()
+        if isNewSession(.write) {
+            writeBlock = 0      // 巻き戻し。既存ブロックは上書きされるまで残す
         }
         lastOp = .write
-        lastOpFrame = frame
         writeBuffer.removeAll()
         writeLong = longHeader
         isWriting = true
@@ -72,13 +76,19 @@ final class CassetteTape {
     func writeByte(_ b: UInt8, frame: Int) {
         guard isWriting else { return }
         writeBuffer.append(b)
-        lastOpFrame = frame
     }
 
-    /// TAPOOF: ブロックを確定してファイルへ保存する
+    /// TAPOOF: ブロックを確定してファイルへ保存する。
+    /// 現在の書き込み位置に上書きし、位置を 1 つ進める。
     func endWrite() {
         guard isWriting else { return }
-        blocks.append(Block(longHeader: writeLong, data: writeBuffer))
+        let block = Block(longHeader: writeLong, data: writeBuffer)
+        if writeBlock < blocks.count {
+            blocks[writeBlock] = block
+        } else {
+            blocks.append(block)
+        }
+        writeBlock += 1
         writeBuffer.removeAll()
         isWriting = false
         save()
@@ -87,13 +97,22 @@ final class CassetteTape {
     // MARK: - 読み出し (TAPION / TAPIN / TAPIOF)
 
     /// TAPION: 次のブロックのヘッダを検出する。成功なら true。
-    /// 新しいセッションなら先頭ブロックへ巻き戻す。
+    ///
+    /// 実機の TAPION はテープを前へ送りながら次のヘッダを探すため、
+    /// 呼ばれるたびに次のブロックへ進む。読み出しセッションの開始時だけ
+    /// 先頭へ巻き戻す。
+    ///
+    /// ゲームによっては目的のファイルが見つかるまで TAPIOF を挟まずに
+    /// TAPION を繰り返す（Shalom のロードは識別子 0xEA が一致しないと
+    /// TAPION からやり直す）。ここで前へ進めないと同じブロックを読み続けて
+    /// 無限ループになる。
     func beginRead(frame: Int) -> Bool {
-        if isNewSession(.read, frame: frame) {
-            readBlock = 0
+        if isNewSession(.read) {
+            readBlock = 0       // 巻き戻し
+        } else {
+            readBlock += 1      // 次のヘッダを探して前へ送る
         }
         lastOp = .read
-        lastOpFrame = frame
         readPos = 0
         return readBlock < blocks.count
     }
@@ -105,13 +124,12 @@ final class CassetteTape {
         guard readPos < block.data.count else { return nil }
         let b = block.data[readPos]
         readPos += 1
-        lastOpFrame = frame
         return b
     }
 
-    /// TAPIOF: 読み出しを終了し、次のブロックへ進める
+    /// TAPIOF: 読み出しを終了する。
+    /// ブロックの送りは TAPION 側が行うため、ここでは位置を進めない。
     func endRead() {
-        if readBlock < blocks.count { readBlock += 1 }
         readPos = 0
     }
 
@@ -140,6 +158,7 @@ final class CassetteTape {
         writeBuffer.removeAll()
         isWriting = false
         lastOp = .none
+        writeBlock = 0
         // ロードした内容をディスクにも反映し、テープの永続化ファイルと一致させる
         save()
     }
@@ -170,6 +189,7 @@ final class CassetteTape {
         readBlock = 0
         readPos = 0
         lastOp = .none
+        writeBlock = 0
         guard let url = fileURL, let data = try? Data(contentsOf: url) else { return }
         var i = 0
         while i + 5 <= data.count {
@@ -192,6 +212,7 @@ final class CassetteTape {
         readBlock = 0
         readPos = 0
         lastOp = .none
+        writeBlock = 0
         fileURL = nil
     }
 
